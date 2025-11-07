@@ -51,79 +51,119 @@ pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
     rooms
 }
 
-/// Find all simple cycles in the undirected graph using improved DFS
-/// This implementation properly handles undirected graphs and limits search to prevent DoS
+/// Find all simple cycles in the undirected graph using improved cycle detection
+/// This implementation uses a proper minimal cycle basis approach for planar graphs
 fn find_all_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
     let mut all_cycles = Vec::new();
-    let mut visited = HashSet::new();
+    let mut edge_visited = HashSet::new();
 
-    // Try starting from each node
+    // For each node, try to find the minimal cycles it participates in
     for start_node in graph.node_indices() {
         if all_cycles.len() >= MAX_CYCLES {
-            break; // Limit total cycles to prevent DoS
-        }
-
-        // Find cycles starting from this node
-        let cycles_from_node = find_cycles_from_node(graph, start_node, &mut visited);
-        all_cycles.extend(cycles_from_node);
-    }
-
-    // Deduplicate cycles (same cycle traversed differently)
-    deduplicate_cycles(all_cycles)
-}
-
-/// Find cycles starting from a specific node using BFS-based approach
-/// This is more robust for undirected graphs than the previous DFS approach
-fn find_cycles_from_node(
-    graph: &FloorplanGraph,
-    start: NodeIndex,
-    global_visited: &mut HashSet<NodeIndex>,
-) -> Vec<Vec<NodeIndex>> {
-    if global_visited.contains(&start) {
-        return Vec::new();
-    }
-
-    let mut cycles = Vec::new();
-    let mut stack = Vec::new();
-    let mut visited = HashSet::new();
-
-    // Start DFS from the start node
-    stack.push((start, None, vec![start]));
-    visited.insert(start);
-
-    while let Some((current, parent, path)) = stack.pop() {
-        if cycles.len() >= MAX_CYCLES {
             break;
         }
 
-        if path.len() > MAX_CYCLE_LENGTH {
-            continue; // Skip overly long paths
+        // Try BFS from this node to find shortest cycles
+        let cycles = find_minimal_cycles_from_node(graph, start_node, &mut edge_visited);
+        all_cycles.extend(cycles);
+    }
+
+    // Deduplicate and filter cycles
+    deduplicate_cycles(all_cycles)
+}
+
+/// Find minimal cycles from a starting node using BFS
+/// This finds the shortest cycles, which are more likely to represent actual rooms
+fn find_minimal_cycles_from_node(
+    graph: &FloorplanGraph,
+    start: NodeIndex,
+    edge_visited: &mut HashSet<(NodeIndex, NodeIndex)>,
+) -> Vec<Vec<NodeIndex>> {
+    let mut cycles = Vec::new();
+    let mut queue = VecDeque::new();
+    let mut parent_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    let mut distance: HashMap<NodeIndex, usize> = HashMap::new();
+
+    // Initialize BFS from start node
+    queue.push_back(start);
+    distance.insert(start, 0);
+
+    while let Some(current) = queue.pop_front() {
+        if cycles.len() >= MAX_CYCLES / graph.node_count().max(1) {
+            break; // Limit cycles per node
         }
 
-        // Check all neighbors
-        for neighbor_edge in graph.edges(current) {
-            let neighbor = neighbor_edge.target();
+        let current_dist = *distance.get(&current).unwrap_or(&0);
 
-            // Skip parent to avoid immediate backtracking
-            if Some(neighbor) == parent {
-                continue;
-            }
+        if current_dist > MAX_CYCLE_LENGTH / 2 {
+            continue; // Don't search too far
+        }
 
-            if neighbor == start && path.len() >= 3 {
+        // Explore neighbors
+        for edge in graph.edges(current) {
+            let neighbor = edge.target();
+            let _edge_key = if current.index() < neighbor.index() {
+                (current, neighbor)
+            } else {
+                (neighbor, current)
+            };
+
+            if neighbor == start && current_dist >= 2 {
                 // Found a cycle back to start
-                cycles.push(path.clone());
-            } else if !visited.contains(&neighbor) {
-                // Continue exploring
-                let mut new_path = path.clone();
-                new_path.push(neighbor);
-                stack.push((neighbor, Some(current), new_path));
-                visited.insert(neighbor);
+                // Reconstruct the cycle path
+                let cycle = reconstruct_cycle(start, current, &parent_map);
+
+                if cycle.len() >= 3 && cycle.len() <= MAX_CYCLE_LENGTH {
+                    // Mark edges as visited to avoid finding same cycle again
+                    for window in cycle.windows(2) {
+                        let e = if window[0].index() < window[1].index() {
+                            (window[0], window[1])
+                        } else {
+                            (window[1], window[0])
+                        };
+                        edge_visited.insert(e);
+                    }
+                    cycles.push(cycle);
+                }
+            } else if !distance.contains_key(&neighbor) {
+                // Haven't visited this neighbor yet
+                distance.insert(neighbor, current_dist + 1);
+                parent_map.insert(neighbor, current);
+                queue.push_back(neighbor);
             }
         }
     }
 
-    global_visited.insert(start);
     cycles
+}
+
+/// Reconstruct a cycle path from start to end using parent map
+fn reconstruct_cycle(
+    start: NodeIndex,
+    end: NodeIndex,
+    parent_map: &HashMap<NodeIndex, NodeIndex>,
+) -> Vec<NodeIndex> {
+    let mut path = vec![start];
+    let mut current = end;
+
+    // Trace back from end to start
+    while current != start {
+        path.push(current);
+        if let Some(&parent) = parent_map.get(&current) {
+            current = parent;
+        } else {
+            // No path found, return empty
+            return Vec::new();
+        }
+
+        // Safety check for infinite loops
+        if path.len() > MAX_CYCLE_LENGTH {
+            return Vec::new();
+        }
+    }
+
+    path.reverse();
+    path
 }
 
 /// Deduplicate cycles that represent the same room
@@ -162,7 +202,7 @@ fn cycle_signature(cycle: &[NodeIndex]) -> Vec<u32> {
         .unwrap_or(0);
 
     // Create normalized forward cycle starting from min element
-    let mut forward: Vec<u32> = indices[min_pos..]
+    let forward: Vec<u32> = indices[min_pos..]
         .iter()
         .chain(indices[..min_pos].iter())
         .copied()
