@@ -1,0 +1,578 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Set up Cargo workspace and project structure",
+        "description": "Initialize a Cargo workspace with separate crates for Leptos frontend, Axum backend, and Tauri stretch, including dependencies like Leptos, Axum, nalgebra, petgraph, geo, and aws-sdk-rust.",
+        "details": "Create a new Cargo workspace with three members: leptos-frontend, axum-backend, and tauri-stretch. In the root Cargo.toml, add workspace members and shared dependencies. For leptos-frontend, use Leptos 0.7+ with Trunk for WASM builds and wasm-bindgen for canvas integration. For axum-backend, set up Axum 0.7+ with tower middleware. Include dev tools like just for task running, Biome for linting, and Criterion for benchmarks. Ensure Rust 1.80+ is used. Pseudo-code: Run 'cargo new --lib leptos-frontend', 'cargo new --bin axum-backend', etc., then configure Cargo.toml with [workspace] and dependencies.",
+        "testStrategy": "Verify workspace builds successfully with 'cargo check' and 'trunk build' for frontend. Unit test basic crate structures.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Initialize Cargo workspace structure",
+            "description": "Create a new Cargo workspace directory and set up the root Cargo.toml with workspace members for leptos-frontend, axum-backend, and tauri-stretch.",
+            "dependencies": [],
+            "details": "Run 'cargo new workspace_name' to create the root directory. Edit the root Cargo.toml to include [workspace] section with members = [\"leptos-frontend\", \"axum-backend\", \"tauri-stretch\"]. Ensure the workspace is configured for Rust 1.80+.",
+            "status": "pending",
+            "testStrategy": "Verify workspace creation by running 'cargo check' in the root directory to ensure no errors."
+          },
+          {
+            "id": 2,
+            "title": "Configure individual crates",
+            "description": "Set up each crate with specific dependencies and configurations: leptos-frontend with Leptos 0.7+ and Trunk, axum-backend with Axum 0.7+ and tower, tauri-stretch as a basic Tauri project.",
+            "dependencies": [
+              1
+            ],
+            "details": "For leptos-frontend: Run 'cargo new --lib leptos-frontend' and add Leptos, Trunk, wasm-bindgen to Cargo.toml. For axum-backend: Run 'cargo new --bin axum-backend' and add Axum, tower. For tauri-stretch: Run 'cargo new --bin tauri-stretch' and initialize with Tauri CLI for basic setup. Ensure each crate's Cargo.toml is properly configured.",
+            "status": "pending",
+            "testStrategy": "Build each crate individually with 'cargo build' and check for compilation errors."
+          },
+          {
+            "id": 3,
+            "title": "Set up shared dependencies and dev tools",
+            "description": "Add shared dependencies like nalgebra, petgraph, geo, aws-sdk-rust to the workspace Cargo.toml, and configure dev tools such as just, Biome, and Criterion.",
+            "dependencies": [
+              1
+            ],
+            "details": "In the root Cargo.toml, under [workspace.dependencies], add versions for nalgebra, petgraph, geo, aws-sdk-rust, Leptos, Axum, image (for JPG loading), csv (for metadata parsing), serde, etc. Set up justfile for task running, configure Biome for linting in biome.json, and add Criterion for benchmarks in dev-dependencies. Ensure all tools are installed and configured correctly.",
+            "status": "pending",
+            "testStrategy": "Run 'cargo check' on the workspace to verify dependencies resolve, and test dev tools like 'just --help' or 'biome check'."
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "Integrate HuggingFace floorplan dataset",
+        "description": "Load and process 101 real floorplan images from HuggingFace cache with metadata annotations for room detection training and validation.",
+        "details": "Use the existing HuggingFace dataset at ~/.cache/huggingface/hub/datasets--umesh16071973--New_Floorplan_demo_dataset/ containing 101 real apartment floorplan images (0.jpg to 100.jpg) with metadata.csv containing ground-truth room descriptions. Create a data loader module that parses metadata.csv and loads corresponding JPG images. Dataset contains 3-4 room apartments with detailed descriptions of room layouts, orientations, and furniture placement.",
+        "testStrategy": "Verify all 101 images load successfully; validate metadata.csv parsing; ensure image-description pairing is correct; visual inspection of sample floorplans.",
+        "priority": "high",
+        "dependencies": [
+          1
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create HuggingFace dataset loader crate",
+            "description": "Create a new Cargo crate for loading and processing the HuggingFace floorplan dataset, with dependencies on image and csv crates.",
+            "dependencies": [],
+            "details": "In the Cargo workspace, run 'cargo new --lib hf_floorplan_loader' to create a library crate. Add image, csv, and serde to Cargo.toml for image loading and CSV parsing. Ensure the crate is added to the workspace members in the root Cargo.toml.",
+            "status": "pending",
+            "testStrategy": "Verify the crate builds successfully with 'cargo check' and dependencies are correctly added."
+          },
+          {
+            "id": 2,
+            "title": "Define FloorplanData struct with metadata",
+            "description": "Define structs for FloorplanData containing image path, file name, and text description from metadata.csv.",
+            "dependencies": [
+              1
+            ],
+            "details": "In the hf_floorplan_loader crate, define struct FloorplanData { file_name: String, image_path: PathBuf, description: String }. Implement Deserialize for CSV parsing using serde. The metadata.csv has columns: file_name (e.g., '0.jpg') and text (detailed room description).",
+            "status": "pending",
+            "testStrategy": "Unit test struct creation and deserialization from sample CSV data; verify all fields parse correctly."
+          },
+          {
+            "id": 3,
+            "title": "Implement metadata.csv parser",
+            "description": "Create a function to parse metadata.csv and return a vector of FloorplanData structs with all 101 entries.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Use csv::Reader to parse ~/.cache/huggingface/hub/datasets--umesh16071973--New_Floorplan_demo_dataset/snapshots/*/metadata.csv. Map each row to FloorplanData, constructing full image paths. Handle any parsing errors gracefully. Expected format: file_name,text where text contains detailed apartment layout descriptions.",
+            "status": "pending",
+            "testStrategy": "Test with the actual metadata.csv; verify 101 entries are parsed; validate sample descriptions match expected format."
+          },
+          {
+            "id": 4,
+            "title": "Implement image loader and validator",
+            "description": "Add functionality to load JPG images using the image crate and validate all 101 floorplan images are accessible.",
+            "dependencies": [
+              1,
+              2,
+              3
+            ],
+            "details": "Create a function load_floorplan_image(path: &Path) -> Result<DynamicImage> that uses image::open(). Add a validation function that iterates through all FloorplanData entries and attempts to load each image, reporting any missing or corrupted files.",
+            "status": "pending",
+            "testStrategy": "Load all 101 images; verify no errors; check image dimensions are reasonable; visual inspection of 5-10 sample images."
+          },
+          {
+            "id": 5,
+            "title": "Create dataset iterator and batch loader",
+            "description": "Implement an iterator pattern for the dataset and batch loading functionality for processing multiple floorplans at once.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "Create a FloorplanDataset struct that implements Iterator<Item=FloorplanData>. Add methods like .batch(n: usize) for loading n floorplans at once, and .shuffle() for randomizing order. Include methods to split dataset into train/val/test sets (e.g., 80/10/10 split).",
+            "status": "pending",
+            "testStrategy": "Test iterator returns all 101 items; verify batch loading works correctly; ensure shuffle produces different orders; validate train/val/test splits."
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Implement basic Leptos UI for file upload",
+        "description": "Build a simple Leptos component with a file upload form to accept JSON blueprints, using signals for reactive state.",
+        "details": "In leptos-frontend, create a component with <input type='file'> and a button to trigger upload. Use Leptos signals to store uploaded data. Integrate with web-sys for file reading. Pseudo-code: let (file_data, set_file_data) = create_signal(cx, None); view! { cx, <input on:change=move |ev| { let files = ev.target().files().unwrap(); // read file as text, parse JSON, set_file_data } /> }",
+        "testStrategy": "Unit test component rendering; integration test file upload in browser; verify JSON parsing.",
+        "priority": "high",
+        "dependencies": [
+          1
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create Leptos component structure for file upload",
+            "description": "Set up the basic Leptos component with an input field for file selection and a button to trigger the upload process.",
+            "dependencies": [],
+            "details": "In the leptos-frontend crate, define a new component function that returns a view containing an <input type='file'> element and a submit button. Use Leptos' view! macro to structure the UI, ensuring the input accepts JSON files. Initialize the component with necessary imports from leptos and web-sys.",
+            "status": "pending",
+            "testStrategy": "Unit test the component rendering to ensure the input and button are displayed correctly."
+          },
+          {
+            "id": 2,
+            "title": "Integrate file reading and JSON parsing with Leptos signals",
+            "description": "Implement the logic to read the selected file using web-sys, parse it as JSON, and store the data in a Leptos signal for reactive state management.",
+            "dependencies": [
+              1
+            ],
+            "details": "Within the component, create a signal using create_signal to hold the parsed JSON data. Attach an on:change event handler to the file input that reads the file as text via web-sys FileReader or similar API, parses the JSON, and updates the signal. Handle potential errors in file reading and JSON parsing gracefully.",
+            "status": "pending",
+            "testStrategy": "Integration test the file upload in a browser environment to verify JSON parsing and signal updates."
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "title": "Implement backend line parsing and graph construction",
+        "description": "In Axum backend, create an endpoint to parse input JSON lines into a graph using petgraph, representing walls as nodes/edges.",
+        "details": "Define structs for Line and Point. In an Axum handler, deserialize JSON to Vec<Line>, build a petgraph::Graph with nodes as points and edges as lines. Use nalgebra for vector operations if needed. Pseudo-code: fn parse_lines(lines: Vec<Line>) -> Graph<Point, Line> { let mut graph = Graph::new(); for line in lines { let start_node = graph.add_node(line.start); let end_node = graph.add_node(line.end); graph.add_edge(start_node, end_node, line); } graph }",
+        "testStrategy": "Unit tests for parsing valid/invalid JSON; benchmark graph construction with Criterion; verify graph structure with small mocks.",
+        "priority": "high",
+        "dependencies": [
+          1,
+          2
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Define Line and Point data structures",
+            "description": "Create Rust structs for Point and Line to represent geometric data in the graph, ensuring compatibility with petgraph and nalgebra.",
+            "dependencies": [],
+            "details": "Define a Point struct with f64 fields for x and y coordinates, possibly using nalgebra::Point2 for vector operations. Define a Line struct with start and end fields of type Point. Implement serde traits for JSON serialization/deserialization.",
+            "status": "pending",
+            "testStrategy": "Unit tests to verify struct creation, serialization, and deserialization with valid and invalid data."
+          },
+          {
+            "id": 2,
+            "title": "Implement graph construction logic with petgraph",
+            "description": "Develop a function to build a petgraph::Graph from a vector of Lines, adding points as nodes and lines as edges.",
+            "dependencies": [
+              1
+            ],
+            "details": "Create a function parse_lines(lines: Vec<Line>) -> Graph<Point, Line> that initializes a new graph, iterates over each line, adds start and end points as nodes (handling duplicates), and adds an edge between them with the line data. Use petgraph's add_node and add_edge methods.",
+            "status": "pending",
+            "testStrategy": "Unit tests with mock Vec<Line> to verify graph structure, node counts, and edge connections; benchmark performance with Criterion for large inputs."
+          },
+          {
+            "id": 3,
+            "title": "Implement Axum endpoint for line parsing",
+            "description": "Create an Axum HTTP handler that accepts JSON input, deserializes it to Vec<Line>, and returns the constructed graph.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "In the Axum backend, define a POST endpoint (e.g., /parse-lines) that takes JSON body as Vec<Line>, calls the parse_lines function to build the graph, and returns the graph as JSON. Handle errors for invalid JSON or parsing failures.",
+            "status": "pending",
+            "testStrategy": "Integration tests for the endpoint with valid JSON inputs, invalid JSON, and edge cases; verify response format and error handling."
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Detect enclosed rooms via cycle detection",
+        "description": "Extend backend to detect cycles in the graph representing enclosed rooms, filter by area threshold, and compute bounding boxes using nalgebra and geo.",
+        "details": "Use petgraph algorithms to find cycles (e.g., simple_cycles). For each cycle, compute polygon area with geo crate, filter if > threshold. Compute bounding box as [min_x, min_y, max_x, max_y]. Pseudo-code: fn detect_rooms(graph: &Graph) -> Vec<Room> { let cycles = petgraph::algo::simple_cycles(graph); cycles.into_iter().filter(|cycle| geo::area(cycle) > THRESH).map(|cycle| { let bbox = nalgebra::bounding_box(&cycle); Room { id: generate_id(), bounding_box: bbox, name_hint: heuristic_name(bbox) } }).collect() }",
+        "testStrategy": "Unit tests with known cycles; IoU validation against ground-truth mocks; benchmark detection time.",
+        "priority": "high",
+        "dependencies": [
+          4
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Implement cycle detection in the graph",
+            "description": "Use petgraph algorithms to find all simple cycles in the graph representing the blueprint walls.",
+            "dependencies": [],
+            "details": "Integrate petgraph::algo::simple_cycles to detect cycles. Ensure the graph is built from Task 4. Handle potential large graphs by considering performance.",
+            "status": "pending",
+            "testStrategy": "Unit tests with mock graphs containing known cycles; benchmark detection time for various graph sizes."
+          },
+          {
+            "id": 2,
+            "title": "Compute polygon area for each cycle using geo crate",
+            "description": "For each detected cycle, calculate the area of the polygon formed by the cycle points using the geo crate.",
+            "dependencies": [
+              1
+            ],
+            "details": "Convert cycle points to a geo::Polygon, then use geo::area to compute the area. Ensure points are in correct order for polygon formation.",
+            "status": "pending",
+            "testStrategy": "Unit tests with predefined polygons and expected areas; validate against known geometric shapes."
+          },
+          {
+            "id": 3,
+            "title": "Calculate bounding box for each cycle using nalgebra",
+            "description": "For each cycle, compute the axis-aligned bounding box as [min_x, min_y, max_x, max_y] using nalgebra.",
+            "dependencies": [
+              1
+            ],
+            "details": "Use nalgebra to find min and max coordinates from the cycle points. Store as a bounding box structure compatible with Room.",
+            "status": "pending",
+            "testStrategy": "Unit tests with sample point sets and expected bounding boxes; check edge cases like single points or lines."
+          },
+          {
+            "id": 4,
+            "title": "Filter cycles by area threshold and generate heuristic names",
+            "description": "Filter detected cycles where area exceeds the threshold, compute bounding boxes, and assign heuristic names based on bounding box.",
+            "dependencies": [
+              2,
+              3
+            ],
+            "details": "Apply area filter from Task 2, use bounding box from Task 3, generate unique IDs and heuristic names (e.g., based on size or position). Collect into Vec<Room>.",
+            "status": "pending",
+            "testStrategy": "Unit tests for filtering logic with mock cycles; IoU validation against ground-truth rooms; integration tests with full detection function."
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Integrate frontend with backend API",
+        "description": "Connect Leptos UI to Axum backend via HTTP calls to send uploaded JSON and receive detected rooms, updating signals for reactivity.",
+        "details": "In Leptos, use reqwest or leptos_axum for API calls. On upload, POST JSON to /detect endpoint, receive Vec<Room>, update signals. Pseudo-code: async fn call_backend(data: &str) -> Vec<Room> { reqwest::post(\"http://localhost:3000/detect\").json(&serde_json::from_str(data)?).await?.json().await? }",
+        "testStrategy": "Integration tests for API calls; e2e test upload → detection → response; mock backend for unit tests.",
+        "priority": "high",
+        "dependencies": [
+          3,
+          5
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Set up HTTP client in Leptos",
+            "description": "Configure the Leptos frontend to make HTTP requests to the Axum backend using reqwest or leptos_axum, including setting up the client for POST requests to the /detect endpoint.",
+            "dependencies": [],
+            "details": "In the Leptos crate, add reqwest as a dependency. Create an async function to handle the API call, such as posting JSON data to http://localhost:3000/detect. Ensure proper error handling for network issues and invalid responses. Integrate this into the upload handler to send the parsed JSON data.",
+            "status": "pending",
+            "testStrategy": "Unit tests for the HTTP client function with mocked responses; integration tests to verify successful POST requests to a test endpoint."
+          },
+          {
+            "id": 2,
+            "title": "Handle API responses and update signals",
+            "description": "Process the response from the backend API, deserialize it into Vec<Room>, and update Leptos signals to trigger reactive UI updates for displaying detected rooms.",
+            "dependencies": [
+              1
+            ],
+            "details": "After receiving the response from the /detect endpoint, use serde to deserialize the JSON into Vec<Room>. Update the relevant Leptos signals (e.g., for rooms and canvas rendering) to ensure the UI reacts to the new data. Handle errors gracefully, such as displaying error messages if the API call fails or returns invalid data.",
+            "status": "pending",
+            "testStrategy": "Unit tests for deserialization and signal updates; e2e tests simulating the full upload to response flow with a mock backend."
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Render detected rooms on canvas",
+        "description": "Implement canvas rendering in Leptos to overlay bounding boxes on the blueprint, using web-sys or plotters for drawing.",
+        "details": "Add a <canvas> element in Leptos view. Use CanvasRenderingContext2d to draw lines from input and rectangles for rooms. Bind to signals for updates. Pseudo-code: let canvas_ref = create_node_ref(cx); create_effect(cx, move |_| { let ctx = canvas_ref.get().unwrap().get_context(\"2d\")?; // draw lines and boxes });",
+        "testStrategy": "Visual inspection in browser; unit tests for drawing functions; performance test for large blueprints.",
+        "priority": "medium",
+        "dependencies": [
+          6
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Add canvas element to Leptos view",
+            "description": "Integrate a <canvas> element into the Leptos component view to serve as the rendering surface for the blueprint and room overlays.",
+            "dependencies": [],
+            "details": "In the Leptos component, add a <canvas> element with appropriate width and height attributes, and create a node reference using create_node_ref(cx) to access it in effects for drawing operations.",
+            "status": "pending",
+            "testStrategy": "Verify canvas element renders correctly in the browser DOM using visual inspection or DOM queries in tests."
+          },
+          {
+            "id": 2,
+            "title": "Implement drawing of blueprint lines on canvas",
+            "description": "Use CanvasRenderingContext2d to draw the blueprint lines from the input data onto the canvas.",
+            "dependencies": [
+              1
+            ],
+            "details": "In a Leptos effect, obtain the CanvasRenderingContext2d from the canvas reference, then iterate over the blueprint line data to draw paths using ctx.begin_path(), ctx.move_to(), ctx.line_to(), and ctx.stroke() methods.",
+            "status": "pending",
+            "testStrategy": "Unit tests for the drawing function with mock canvas context; visual inspection to ensure lines match the blueprint input."
+          },
+          {
+            "id": 3,
+            "title": "Overlay room bounding boxes with reactive updates",
+            "description": "Draw rectangles for detected rooms on the canvas and bind the rendering to Leptos signals for real-time updates.",
+            "dependencies": [
+              2
+            ],
+            "details": "Extend the canvas effect to draw rectangles using ctx.rect() and ctx.stroke() or ctx.fill() for each room's bounding box from the signals. Ensure the effect re-runs on signal changes to update the overlay dynamically.",
+            "status": "pending",
+            "testStrategy": "Manual testing for reactivity by changing room data and observing canvas updates; performance tests for large numbers of rooms."
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Add reactivity for draggable overlays",
+        "description": "Enhance UI with draggable room boxes using Leptos signals and mouse events for verification and adjustment.",
+        "details": "Attach mouse event listeners to canvas for drag start/move/end. Update room bounding_box signals on drag. Pseudo-code: let (rooms, set_rooms) = create_signal(cx, vec![]); // on mousedown, track which box; on mousemove, update coords in set_rooms.",
+        "testStrategy": "Manual testing for drag accuracy; unit tests for event handling; e2e for full interaction.",
+        "priority": "medium",
+        "dependencies": [
+          7
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Attach mouse event listeners to canvas",
+            "description": "Implement event listeners for mousedown, mousemove, and mouseup on the canvas element to initiate and handle drag operations.",
+            "dependencies": [],
+            "details": "In the Leptos component, add event listeners to the canvas using web-sys or leptos event handlers. On mousedown, identify if a room box is clicked. On mousemove, calculate drag deltas. On mouseup, finalize the drag. Ensure listeners are attached when the component mounts and cleaned up on unmount.",
+            "status": "pending",
+            "testStrategy": "Unit tests for listener attachment and event firing; manual testing for mouse interactions."
+          },
+          {
+            "id": 2,
+            "title": "Track drag state during mouse events",
+            "description": "Maintain state to track which room is being dragged, initial position, and current drag offsets using Leptos signals.",
+            "dependencies": [],
+            "details": "Use Leptos signals to store drag state: e.g., a signal for the currently dragged room ID, initial mouse position, and offset. Update these signals on mousedown (set dragged room), mousemove (update offset), and mouseup (reset state). This ensures reactive tracking of drag operations.",
+            "status": "pending",
+            "testStrategy": "Unit tests for signal updates on events; integration tests for state persistence during drag."
+          },
+          {
+            "id": 3,
+            "title": "Update room bounding boxes reactively on drag",
+            "description": "Modify the rooms signal to update bounding box coordinates based on drag offsets, ensuring the UI reflects changes in real-time.",
+            "dependencies": [],
+            "details": "In the mousemove handler, calculate new bounding box positions using the drag offset and update the rooms signal via set_rooms. Ensure the canvas re-renders the boxes reactively. Handle edge cases like dragging outside canvas bounds or overlapping rooms.",
+            "status": "pending",
+            "testStrategy": "Manual testing for accurate position updates; unit tests for bounding box calculations; e2e tests for full drag interaction."
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Integrate AWS Textract for real floorplan image processing",
+        "description": "Add AWS SDK integration in backend to extract architectural lines from the 101 HuggingFace floorplan images using Textract, with validation against ground-truth metadata.",
+        "details": "Use aws-sdk-textract to process the real floorplan JPG images from HuggingFace dataset. Parse Textract response to Vec<Line> representing walls and architectural features. Process images in batches and validate extraction quality against the metadata.csv descriptions. Pseudo-code: async fn extract_lines(image_path: PathBuf) -> Vec<Line> { let client = TextractClient::new(region); let image_bytes = fs::read(image_path)?; let resp = client.analyze_document().document(Document::blob(image_bytes)).feature_types(FeatureType::Layout).send().await?; // parse geometry into Vec<Line> }",
+        "testStrategy": "Process all 101 HuggingFace floorplan images with Textract; compare extracted lines against metadata descriptions; calculate accuracy metrics; validate line coordinates are within image bounds.",
+        "priority": "medium",
+        "dependencies": [
+          2,
+          5
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Set up AWS SDK integration in backend",
+            "description": "Install and configure the aws-sdk-textract crate in the axum-backend crate, including setting up AWS credentials and region configuration for Textract API calls.",
+            "dependencies": [],
+            "details": "Add aws-sdk-textract to Cargo.toml dependencies. Configure AWS credentials using environment variables or AWS config files. Initialize TextractClient with the appropriate region. Ensure async runtime compatibility with Axum.",
+            "status": "pending",
+            "testStrategy": "Unit tests to verify client initialization and mock credential setup."
+          },
+          {
+            "id": 2,
+            "title": "Implement batch floorplan processing endpoint",
+            "description": "Create a POST endpoint in the Axum backend to process HuggingFace floorplan images in batches using Textract.",
+            "dependencies": [
+              1
+            ],
+            "details": "Add a new route like /process-floorplans in the Axum router that accepts a list of floorplan indices (0-100) or 'all'. Use the hf_floorplan_loader to load corresponding images from the HuggingFace cache. Process images with Textract in configurable batch sizes (e.g., 10 at a time) to avoid rate limits. Return extracted lines with metadata for each processed floorplan.",
+            "status": "pending",
+            "testStrategy": "Integration tests for endpoint with sample indices; test batch processing with 5 images; verify rate limiting works; validate response format."
+          },
+          {
+            "id": 3,
+            "title": "Parse Textract responses to extract architectural lines",
+            "description": "Implement parsing logic to convert Textract's analyze_document response with Layout feature into Vec<Line> representing walls and architectural boundaries.",
+            "dependencies": [
+              1
+            ],
+            "details": "After calling client.analyze_document() with FeatureType::Layout, extract geometric information from the response. Focus on horizontal and vertical lines representing walls. Map Textract's Geometry objects (bounding boxes or polygons) to Line { start: [f64;2], end: [f64;2], is_load_bearing: bool }. Normalize coordinates to match image dimensions. Filter out non-architectural elements (furniture, text).",
+            "status": "pending",
+            "testStrategy": "Unit tests with mocked Textract responses; process 5 sample HuggingFace floorplans; validate extracted lines visually; ensure line coordinates are within image bounds."
+          },
+          {
+            "id": 4,
+            "title": "Validate extraction against ground-truth metadata",
+            "description": "Compare Textract-extracted architectural lines against the ground-truth room descriptions from metadata.csv to calculate accuracy metrics.",
+            "dependencies": [
+              2,
+              3
+            ],
+            "details": "For each processed floorplan, compare the detected rooms (from graph-based detection on Textract lines) against the room descriptions in metadata.csv. Calculate metrics: room count accuracy, room type matching (kitchen, bedroom, bathroom, hall), spatial relationship validation (e.g., 'bathroom is north of hall'). Generate a validation report showing accuracy across all 101 floorplans.",
+            "status": "pending",
+            "testStrategy": "Process all 101 floorplans; calculate accuracy metrics; generate confusion matrix for room types; manual inspection of 10 best and 10 worst results."
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Implement Tauri stretch for native apps",
+        "description": "Scaffold Tauri app wrapping the Leptos frontend for desktop/mobile, enabling offline processing and native file dialogs.",
+        "details": "Use Tauri 2.0+ to create a new project, integrate leptos-frontend as webview. Add #[tauri::command] for backend functions. Enable mobile targets. Pseudo-code: In tauri.conf.json, set main window to load Leptos app; in lib.rs, define commands like fn process_file(file_path: String) -> Vec<Room> { // call backend logic }",
+        "testStrategy": "Build and run on desktop; test file pickers; emulator tests for mobile; verify offline mode.",
+        "priority": "low",
+        "dependencies": [
+          8,
+          9
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Scaffold Tauri project",
+            "description": "Create a new Tauri 2.0+ project structure for the native app wrapper.",
+            "dependencies": [],
+            "details": "Use the Tauri CLI to initialize a new project in the tauri-stretch crate. Configure tauri.conf.json with basic settings, including window properties and security settings. Ensure the project is set up within the existing Cargo workspace.",
+            "status": "pending",
+            "testStrategy": "Verify project builds successfully with 'cargo tauri build' and check that the basic app window opens."
+          },
+          {
+            "id": 2,
+            "title": "Integrate Leptos webview",
+            "description": "Set up the Leptos frontend as the webview content in the Tauri app.",
+            "dependencies": [
+              1
+            ],
+            "details": "In tauri.conf.json, configure the main window to load the Leptos app built from the leptos-frontend crate. Use Trunk to build the Leptos frontend and point the Tauri webview to the built index.html. Ensure proper asset handling for WASM and static files.",
+            "status": "pending",
+            "testStrategy": "Build the Tauri app and verify that the Leptos UI loads correctly in the native window, including reactive components."
+          },
+          {
+            "id": 3,
+            "title": "Add native commands for backend functions",
+            "description": "Implement Tauri commands to expose backend logic for file processing and offline operations.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "In lib.rs of the tauri-stretch crate, define #[tauri::command] functions such as process_file that call the backend logic (e.g., parsing JSON blueprints into graphs). Register these commands in the Tauri app builder. Enable native file dialogs using Tauri's dialog API for file selection.",
+            "status": "pending",
+            "testStrategy": "Test invoking commands from the Leptos frontend; verify file picker dialogs work and commands return expected data like Vec<Room>."
+          },
+          {
+            "id": 4,
+            "title": "Enable mobile targets",
+            "description": "Configure the Tauri project to build for mobile platforms (iOS and Android).",
+            "dependencies": [
+              1,
+              2,
+              3
+            ],
+            "details": "Install necessary mobile development tools (Xcode for iOS, Android SDK for Android). Update tauri.conf.json to include mobile-specific configurations like bundle identifiers and permissions. Add mobile targets to the Cargo configuration and ensure the app can be built for emulators/simulators.",
+            "status": "pending",
+            "testStrategy": "Build the app for mobile targets; run on emulators to test file dialogs, offline processing, and UI responsiveness."
+          }
+        ]
+      },
+      {
+        "id": 11,
+        "title": "Implement end-to-end validation pipeline with HuggingFace dataset",
+        "description": "Create a comprehensive validation pipeline that processes all 101 HuggingFace floorplan images through the complete detection stack and validates results against ground-truth metadata.",
+        "details": "Build an automated validation pipeline that: (1) loads all 101 floorplan images from HuggingFace cache, (2) processes each through Textract for line extraction, (3) runs graph-based room detection, (4) compares detected rooms against metadata.csv descriptions, (5) calculates accuracy metrics (room count, type, spatial relationships), (6) generates visual outputs with detected room overlays, (7) produces a comprehensive validation report with statistics and failure analysis.",
+        "testStrategy": "Run full pipeline on all 101 images; achieve >80% room detection accuracy; validate spatial relationship extraction; manual review of top 10 failures; generate HTML report with visualizations.",
+        "priority": "high",
+        "dependencies": [
+          2,
+          5,
+          9
+        ],
+        "status": "pending",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Create validation pipeline orchestrator",
+            "description": "Build a pipeline coordinator that manages the end-to-end flow from image loading through detection to validation reporting.",
+            "dependencies": [],
+            "details": "Create a new binary crate 'validation-pipeline' that orchestrates: HuggingFace data loading, Textract processing (with batch management and retry logic), graph-based room detection, metadata comparison, and report generation. Implement progress tracking and error recovery for processing all 101 images. Support parallel processing where possible.",
+            "status": "pending",
+            "testStrategy": "Run pipeline on 5 test images; verify all stages complete; test error recovery; validate progress tracking; ensure parallel processing works."
+          },
+          {
+            "id": 2,
+            "title": "Implement metadata-to-detection comparison engine",
+            "description": "Build a system to parse metadata.csv descriptions and compare them against detected room structures.",
+            "dependencies": [
+              1
+            ],
+            "details": "Parse natural language descriptions from metadata.csv (e.g., 'a 3 room apartment with orientation in the north direction') and extract structured information: room count, room types (hall, kitchen, bedroom, bathroom), spatial relationships (north of, attached to), furniture presence. Compare against detected Room objects from the detection algorithm. Use fuzzy matching for room types and spatial relationship validation.",
+            "status": "pending",
+            "testStrategy": "Test with 10 sample metadata entries; verify room count extraction; validate spatial relationship parsing; test fuzzy matching for room types."
+          },
+          {
+            "id": 3,
+            "title": "Calculate comprehensive accuracy metrics",
+            "description": "Implement metric calculation for room detection accuracy, room type classification, and spatial relationship validation.",
+            "dependencies": [
+              1,
+              2
+            ],
+            "details": "Calculate metrics: (1) Room count accuracy (exact match rate), (2) Room type precision/recall/F1 for each type (kitchen, bedroom, bathroom, hall), (3) Spatial relationship accuracy (% of correctly identified relationships like 'kitchen north of hall'), (4) IoU (Intersection over Union) for bounding boxes if ground-truth boxes available, (5) Overall detection success rate. Store per-image and aggregate statistics.",
+            "status": "pending",
+            "testStrategy": "Test metric calculation on 10 manually annotated samples; verify all metrics compute correctly; validate statistical aggregation; ensure edge cases handled."
+          },
+          {
+            "id": 4,
+            "title": "Generate visual validation outputs",
+            "description": "Create visualizations showing detected rooms overlaid on original floorplan images with color-coded accuracy indicators.",
+            "dependencies": [
+              1,
+              3
+            ],
+            "details": "For each processed floorplan: (1) draw detected room bounding boxes on the original image, (2) color-code by detection confidence or correctness (green=correct, yellow=partial, red=wrong), (3) annotate with detected vs. expected room types, (4) highlight spatial relationship errors, (5) save as PNG with side-by-side comparison. Use image crate for rendering.",
+            "status": "pending",
+            "testStrategy": "Generate visualizations for 10 test images; verify overlays are accurate; test color coding; validate annotations are readable; check output image quality."
+          },
+          {
+            "id": 5,
+            "title": "Generate comprehensive HTML validation report",
+            "description": "Create an interactive HTML report with statistics, visualizations, and detailed failure analysis for all 101 processed floorplans.",
+            "dependencies": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "details": "Generate an HTML report containing: (1) executive summary with overall accuracy metrics, (2) per-room-type performance tables with precision/recall/F1, (3) distribution charts (room counts, detection confidence), (4) gallery of all processed images with thumbnails, (5) detailed failure analysis section showing worst-performing images with reasons, (6) interactive filtering/sorting for images, (7) downloadable CSV with all metrics. Use a template engine or manual HTML generation.",
+            "status": "pending",
+            "testStrategy": "Generate report from full 101-image run; verify all sections render correctly; test interactive features; validate CSV export; check mobile responsiveness."
+          }
+        ]
+      }
+    ],
+    "metadata": {
+      "created": "2025-11-07T19:17:38.779Z",
+      "updated": "2025-11-07T21:45:00.000Z",
+      "description": "Tasks for master context - Updated to use HuggingFace floorplan dataset (101 real images)"
+    }
+  }
+}

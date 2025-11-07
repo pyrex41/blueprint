@@ -1,0 +1,93 @@
+{
+	"meta": {
+		"generatedAt": "2025-11-07T19:43:48.028Z",
+		"tasksAnalyzed": 10,
+		"totalTasks": 10,
+		"analysisCount": 10,
+		"thresholdScore": 5,
+		"projectName": "Taskmaster",
+		"usedResearch": false
+	},
+	"complexityAnalysis": [
+		{
+			"taskId": 1,
+			"taskTitle": "Set up Cargo workspace and project structure",
+			"complexityScore": 5,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Break this task into subtasks for initializing the workspace, configuring each crate (leptos-frontend, axum-backend, tauri-stretch), and setting up shared dependencies and dev tools.",
+			"reasoning": "This involves setting up a multi-crate workspace with specific versions and tools, requiring familiarity with Cargo and Rust ecosystem, but it's mostly boilerplate with moderate effort for configuration and testing builds."
+		},
+		{
+			"taskId": 2,
+			"taskTitle": "Generate mock blueprint data",
+			"complexityScore": 3,
+			"recommendedSubtasks": 0,
+			"expansionPrompt": "No expansion needed as it's a straightforward script.",
+			"reasoning": "Procedural generation using rand and JSON serialization is simple, with low technical challenges and dependencies on basic Rust crates, though testing for realism adds minor effort."
+		},
+		{
+			"taskId": 3,
+			"taskTitle": "Implement basic Leptos UI for file upload",
+			"complexityScore": 4,
+			"recommendedSubtasks": 2,
+			"expansionPrompt": "Split into subtasks for creating the component structure and integrating file reading with signals.",
+			"reasoning": "Involves Leptos reactivity and web-sys for file handling, which has some learning curve for web integration, but implementation is moderate with standard UI patterns."
+		},
+		{
+			"taskId": 4,
+			"taskTitle": "Implement backend line parsing and graph construction",
+			"complexityScore": 6,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Divide into subtasks for defining data structures, implementing the Axum endpoint, and building the graph with petgraph.",
+			"reasoning": "Requires graph construction algorithms, JSON deserialization, and integration with Axum, posing technical challenges in handling graph data structures and benchmarking, with higher effort for testing."
+		},
+		{
+			"taskId": 5,
+			"taskTitle": "Detect enclosed rooms via cycle detection",
+			"complexityScore": 7,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "Break into subtasks for cycle detection, area computation with geo, bounding box calculation, and filtering/heuristic naming.",
+			"reasoning": "Algorithmic complexity in cycle detection and geometric computations using multiple crates (petgraph, geo, nalgebra), with dependencies on prior graph work, demanding thorough testing and potential performance tuning."
+		},
+		{
+			"taskId": 6,
+			"taskTitle": "Integrate frontend with backend API",
+			"complexityScore": 5,
+			"recommendedSubtasks": 2,
+			"expansionPrompt": "Separate into subtasks for setting up HTTP client in Leptos and handling API responses with signals.",
+			"reasoning": "Involves async HTTP calls and reactivity updates, with moderate challenges in error handling and integration testing across frontend-backend."
+		},
+		{
+			"taskId": 7,
+			"taskTitle": "Render detected rooms on canvas",
+			"complexityScore": 6,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Split into subtasks for adding canvas element, drawing lines, and overlaying room boxes with reactivity.",
+			"reasoning": "Canvas rendering in WASM requires web-sys integration, with challenges in performance for large data and binding to signals, plus visual testing needs."
+		},
+		{
+			"taskId": 8,
+			"taskTitle": "Add reactivity for draggable overlays",
+			"complexityScore": 7,
+			"recommendedSubtasks": 3,
+			"expansionPrompt": "Divide into subtasks for attaching mouse event listeners, tracking drag state, and updating bounding boxes reactively.",
+			"reasoning": "Enhances UI with interactive mouse events and signal updates, increasing complexity due to event handling precision, manual testing, and potential edge cases in drag behavior."
+		},
+		{
+			"taskId": 9,
+			"taskTitle": "Integrate AWS Textract for image/PDF processing",
+			"complexityScore": 8,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "Break into subtasks for setting up AWS SDK, implementing file upload endpoint, parsing Textract responses, and integrating with existing graph logic.",
+			"reasoning": "Adds cloud integration with async AWS calls, parsing complex API responses, and handling different file types, with high effort for mocking, security, and real-world testing."
+		},
+		{
+			"taskId": 10,
+			"taskTitle": "Implement Tauri stretch for native apps",
+			"complexityScore": 7,
+			"recommendedSubtasks": 4,
+			"expansionPrompt": "Split into subtasks for scaffolding Tauri project, integrating Leptos webview, adding native commands, and enabling mobile targets.",
+			"reasoning": "Involves cross-platform native app development with Tauri, wrapping web frontend, and offline processing, requiring knowledge of mobile/desktop builds and testing across platforms."
+		}
+	]
+}
