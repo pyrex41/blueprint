@@ -4,6 +4,11 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// Maximum number of cycles to detect (prevent DoS)
+const MAX_CYCLES: usize = 1000;
+// Maximum cycle length to consider (prevent exponential blowup)
+const MAX_CYCLE_LENGTH: usize = 100;
+
 /// Detect rooms in a floorplan graph by finding cycles
 pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
     let cycles = find_all_cycles(graph);
@@ -46,88 +51,92 @@ pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
     rooms
 }
 
-/// Find all simple cycles in the graph using DFS
+/// Find all simple cycles in the undirected graph using improved DFS
+/// This implementation properly handles undirected graphs and limits search to prevent DoS
 fn find_all_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
-    let mut cycles = Vec::new();
-    let mut visited_global = HashSet::new();
+    let mut all_cycles = Vec::new();
+    let mut visited = HashSet::new();
 
-    for node in graph.node_indices() {
-        if visited_global.contains(&node) {
-            continue;
+    // Try starting from each node
+    for start_node in graph.node_indices() {
+        if all_cycles.len() >= MAX_CYCLES {
+            break; // Limit total cycles to prevent DoS
         }
 
-        let mut path = Vec::new();
-        let mut visited_local = HashSet::new();
-
-        dfs_find_cycles(
-            graph,
-            node,
-            None,
-            &mut path,
-            &mut visited_local,
-            &mut visited_global,
-            &mut cycles,
-        );
+        // Find cycles starting from this node
+        let cycles_from_node = find_cycles_from_node(graph, start_node, &mut visited);
+        all_cycles.extend(cycles_from_node);
     }
 
-    // Remove duplicate cycles (same cycle starting from different nodes)
-    deduplicate_cycles(cycles)
+    // Deduplicate cycles (same cycle traversed differently)
+    deduplicate_cycles(all_cycles)
 }
 
-fn dfs_find_cycles(
+/// Find cycles starting from a specific node using BFS-based approach
+/// This is more robust for undirected graphs than the previous DFS approach
+fn find_cycles_from_node(
     graph: &FloorplanGraph,
-    current: NodeIndex,
-    parent: Option<NodeIndex>,
-    path: &mut Vec<NodeIndex>,
-    visited_local: &mut HashSet<NodeIndex>,
-    visited_global: &mut HashSet<NodeIndex>,
-    cycles: &mut Vec<Vec<NodeIndex>>,
-) {
-    if visited_local.contains(&current) {
-        // Found a cycle
-        if let Some(cycle_start_pos) = path.iter().position(|&n| n == current) {
-            let cycle = path[cycle_start_pos..].to_vec();
-            if cycle.len() >= 3 {
-                cycles.push(cycle);
+    start: NodeIndex,
+    global_visited: &mut HashSet<NodeIndex>,
+) -> Vec<Vec<NodeIndex>> {
+    if global_visited.contains(&start) {
+        return Vec::new();
+    }
+
+    let mut cycles = Vec::new();
+    let mut stack = Vec::new();
+    let mut visited = HashSet::new();
+
+    // Start DFS from the start node
+    stack.push((start, None, vec![start]));
+    visited.insert(start);
+
+    while let Some((current, parent, path)) = stack.pop() {
+        if cycles.len() >= MAX_CYCLES {
+            break;
+        }
+
+        if path.len() > MAX_CYCLE_LENGTH {
+            continue; // Skip overly long paths
+        }
+
+        // Check all neighbors
+        for neighbor_edge in graph.edges(current) {
+            let neighbor = neighbor_edge.target();
+
+            // Skip parent to avoid immediate backtracking
+            if Some(neighbor) == parent {
+                continue;
+            }
+
+            if neighbor == start && path.len() >= 3 {
+                // Found a cycle back to start
+                cycles.push(path.clone());
+            } else if !visited.contains(&neighbor) {
+                // Continue exploring
+                let mut new_path = path.clone();
+                new_path.push(neighbor);
+                stack.push((neighbor, Some(current), new_path));
+                visited.insert(neighbor);
             }
         }
-        return;
     }
 
-    visited_local.insert(current);
-    visited_global.insert(current);
-    path.push(current);
-
-    // Explore neighbors
-    for edge in graph.edges(current) {
-        let neighbor = edge.target();
-
-        // Don't go back to parent immediately (avoid trivial back-and-forth)
-        if Some(neighbor) == parent {
-            continue;
-        }
-
-        dfs_find_cycles(
-            graph,
-            neighbor,
-            Some(current),
-            path,
-            visited_local,
-            visited_global,
-            cycles,
-        );
-    }
-
-    path.pop();
-    visited_local.remove(&current);
+    global_visited.insert(start);
+    cycles
 }
 
 /// Deduplicate cycles that represent the same room
+/// Handles cycles with different starting points and reverse traversals
 fn deduplicate_cycles(cycles: Vec<Vec<NodeIndex>>) -> Vec<Vec<NodeIndex>> {
     let mut unique_cycles = Vec::new();
     let mut seen_signatures = HashSet::new();
 
     for cycle in cycles {
+        if cycle.len() < 3 {
+            continue; // Skip invalid cycles
+        }
+
         let signature = cycle_signature(&cycle);
 
         if !seen_signatures.contains(&signature) {
@@ -139,12 +148,45 @@ fn deduplicate_cycles(cycles: Vec<Vec<NodeIndex>>) -> Vec<Vec<NodeIndex>> {
     unique_cycles
 }
 
-/// Create a signature for a cycle to identify duplicates
-/// Sorts the nodes to handle different starting points
+/// Create a canonical signature for a cycle to identify duplicates
+/// Handles different starting points and reverse traversals
 fn cycle_signature(cycle: &[NodeIndex]) -> Vec<u32> {
-    let mut sorted = cycle.iter().map(|n| n.index() as u32).collect::<Vec<_>>();
-    sorted.sort_unstable();
-    sorted
+    let indices: Vec<u32> = cycle.iter().map(|n| n.index() as u32).collect();
+
+    // Find the minimum element position to normalize starting point
+    let min_pos = indices
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, &val)| val)
+        .map(|(pos, _)| pos)
+        .unwrap_or(0);
+
+    // Create normalized forward cycle starting from min element
+    let mut forward: Vec<u32> = indices[min_pos..]
+        .iter()
+        .chain(indices[..min_pos].iter())
+        .copied()
+        .collect();
+
+    // Create normalized reverse cycle
+    let mut reverse: Vec<u32> = indices[min_pos..]
+        .iter()
+        .chain(indices[..min_pos].iter())
+        .rev()
+        .copied()
+        .collect();
+
+    // Rotate reverse to start with min element
+    if let Some(min_pos_rev) = reverse.iter().position(|&x| x == *indices.iter().min().unwrap()) {
+        reverse.rotate_left(min_pos_rev);
+    }
+
+    // Return lexicographically smaller signature
+    if forward <= reverse {
+        forward
+    } else {
+        reverse
+    }
 }
 
 /// Calculate the area of a polygon using the Shoelace formula

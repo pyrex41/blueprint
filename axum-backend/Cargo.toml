@@ -16,6 +16,7 @@ serde_json.workspace = true
 petgraph.workspace = true
 nalgebra.workspace = true
 geo.workspace = true
+ordered-float.workspace = true
 aws-config.workspace = true
 aws-sdk-textract.workspace = true
 image.workspace = true

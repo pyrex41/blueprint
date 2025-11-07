@@ -49,12 +49,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize AWS Textract client
     println!("🔧 Initializing AWS Textract client...");
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let textract_client = TextractClient::new(&config);
-    println!("✅ AWS Textract client ready\n");
 
-    // Process a subset of images (first 5 for demo)
-    let sample_size = 5.min(dataset.len());
-    println!("🔍 Processing first {} images...\n", sample_size);
+    // Validate AWS credentials are configured
+    let credentials = config.credentials_provider();
+    if credentials.is_none() {
+        eprintln!("❌ AWS credentials not configured!");
+        eprintln!("\nPlease configure AWS credentials using one of these methods:");
+        eprintln!("  1. Environment variables: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY");
+        eprintln!("  2. AWS CLI: Run 'aws configure'");
+        eprintln!("  3. IAM role (if running on EC2)");
+        eprintln!("\nFor more info: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html");
+        return Err("AWS credentials not configured".into());
+    }
+
+    let textract_client = TextractClient::new(&config);
+    println!("✅ AWS Textract client ready (Region: {})\n", config.region().map(|r| r.as_ref()).unwrap_or("default"));
+
+    // Get sample size from environment or default to 5
+    let sample_size = std::env::var("SAMPLE_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+        .min(dataset.len());
+
+    // Calculate estimated cost (Textract pricing: ~$1.50 per 1000 pages)
+    let estimated_cost = (sample_size as f64 * 0.0015).max(0.01);
+    println!("⚠️  Cost Estimate:");
+    println!("   Processing {} images with AWS Textract", sample_size);
+    println!("   Estimated cost: ${:.2}", estimated_cost);
+    println!("   (Approximate: $1.50 per 1000 pages)");
+
+    // Ask for confirmation before processing
+    println!("\n📋 Press Enter to continue or Ctrl+C to cancel...");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    println!("\n🔍 Processing {} images...\n", sample_size);
 
     let mut report = ValidationReport {
         total_processed: 0,

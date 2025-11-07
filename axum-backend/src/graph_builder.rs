@@ -1,16 +1,22 @@
-use crate::{Line, Point};
-use petgraph::graph::{Graph, NodeIndex};
+use crate::{Line, Point, PointKey};
+use petgraph::graph::{NodeIndex, UnGraph};
 use std::collections::HashMap;
 
-pub type FloorplanGraph = Graph<Point, Line>;
+// Use UnGraph (undirected graph) for floorplan lines since walls connect points bidirectionally
+pub type FloorplanGraph = UnGraph<Point, Line>;
 
-/// Build a graph from a list of lines
-/// Nodes represent points, edges represent lines connecting them
+/// Build an undirected graph from a list of lines
+/// Nodes represent points, edges represent lines connecting them bidirectionally
 pub fn build_graph(lines: &[Line]) -> FloorplanGraph {
-    let mut graph = Graph::new();
+    let mut graph = UnGraph::new_undirected();
     let mut point_to_node: HashMap<PointKey, NodeIndex> = HashMap::new();
 
     for line in lines {
+        // Skip degenerate lines (start == end)
+        if line.start == line.end {
+            continue;
+        }
+
         // Get or create nodes for start and end points
         let start_key = PointKey::from(&line.start);
         let end_key = PointKey::from(&line.end);
@@ -23,28 +29,11 @@ pub fn build_graph(lines: &[Line]) -> FloorplanGraph {
             .entry(end_key)
             .or_insert_with(|| graph.add_node(line.end.clone()));
 
-        // Add edge between nodes
+        // Add undirected edge between nodes
         graph.add_edge(start_node, end_node, line.clone());
     }
 
     graph
-}
-
-/// Key for hashing points in HashMap
-/// Uses rounded coordinates to handle floating point precision
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PointKey {
-    x: i64,
-    y: i64,
-}
-
-impl From<&Point> for PointKey {
-    fn from(point: &Point) -> Self {
-        PointKey {
-            x: (point.x * 1_000_000.0) as i64,
-            y: (point.y * 1_000_000.0) as i64,
-        }
-    }
 }
 
 #[cfg(test)]

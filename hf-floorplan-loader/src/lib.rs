@@ -25,9 +25,25 @@ pub enum LoaderError {
     IoError(std::io::Error),
     CsvError(csv::Error),
     ImageError(ImageError),
-    DatasetNotFound,
-    InvalidPath,
+    DatasetNotFound(String),
+    InvalidPath(String),
+    EnvironmentError(String),
 }
+
+impl std::fmt::Display for LoaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoaderError::IoError(e) => write!(f, "IO error: {}", e),
+            LoaderError::CsvError(e) => write!(f, "CSV parsing error: {}", e),
+            LoaderError::ImageError(e) => write!(f, "Image loading error: {}", e),
+            LoaderError::DatasetNotFound(msg) => write!(f, "Dataset not found: {}", msg),
+            LoaderError::InvalidPath(msg) => write!(f, "Invalid path: {}", msg),
+            LoaderError::EnvironmentError(msg) => write!(f, "Environment error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for LoaderError {}
 
 impl From<std::io::Error> for LoaderError {
     fn from(err: std::io::Error) -> Self {
@@ -49,18 +65,27 @@ impl From<ImageError> for LoaderError {
 
 /// Finds the HuggingFace dataset snapshot directory
 pub fn find_dataset_path() -> Result<PathBuf, LoaderError> {
-    let home = std::env::var("HOME").map_err(|_| LoaderError::DatasetNotFound)?;
-    let base_path = PathBuf::from(home)
+    let home = std::env::var("HOME").map_err(|e| {
+        LoaderError::EnvironmentError(format!("HOME environment variable not set: {}", e))
+    })?;
+
+    let base_path = PathBuf::from(&home)
         .join(".cache/huggingface/hub/datasets--umesh16071973--New_Floorplan_demo_dataset");
 
     if !base_path.exists() {
-        return Err(LoaderError::DatasetNotFound);
+        return Err(LoaderError::DatasetNotFound(format!(
+            "Dataset directory not found at: {}",
+            base_path.display()
+        )));
     }
 
     // Find the snapshots directory
     let snapshots_dir = base_path.join("snapshots");
     if !snapshots_dir.exists() {
-        return Err(LoaderError::DatasetNotFound);
+        return Err(LoaderError::DatasetNotFound(format!(
+            "Snapshots directory not found at: {}",
+            snapshots_dir.display()
+        )));
     }
 
     // Get the first (and typically only) snapshot directory
@@ -70,7 +95,10 @@ pub fn find_dataset_path() -> Result<PathBuf, LoaderError> {
         .collect();
 
     if snapshot_dirs.is_empty() {
-        return Err(LoaderError::DatasetNotFound);
+        return Err(LoaderError::DatasetNotFound(format!(
+            "No snapshot directories found in: {}",
+            snapshots_dir.display()
+        )));
     }
 
     snapshot_dirs.sort_by_key(|dir| dir.path());
@@ -82,7 +110,10 @@ pub fn parse_metadata(dataset_path: &Path) -> Result<Vec<FloorplanData>, LoaderE
     let metadata_path = dataset_path.join("metadata.csv");
 
     if !metadata_path.exists() {
-        return Err(LoaderError::InvalidPath);
+        return Err(LoaderError::InvalidPath(format!(
+            "metadata.csv not found at: {}",
+            metadata_path.display()
+        )));
     }
 
     let mut reader = ReaderBuilder::new()

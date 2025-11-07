@@ -1,5 +1,6 @@
 use axum::{
-    extract::Json,
+    body::Body,
+    extract::{DefaultBodyLimit, Json},
     http::{header, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -7,6 +8,7 @@ use axum::{
 };
 use geo::{Area, Polygon as GeoPolygon};
 use nalgebra::Point2;
+use ordered_float::OrderedFloat;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
@@ -20,10 +22,27 @@ mod room_detector;
 use graph_builder::*;
 use room_detector::*;
 
+// Security limits to prevent DoS attacks
+const MAX_LINES: usize = 10_000;
+const MAX_COORDINATE_VALUE: f64 = 1_000_000.0;
+const MIN_COORDINATE_VALUE: f64 = -1_000_000.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
+}
+
+impl Point {
+    /// Validate that point coordinates are within reasonable bounds
+    fn is_valid(&self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.x >= MIN_COORDINATE_VALUE
+            && self.x <= MAX_COORDINATE_VALUE
+            && self.y >= MIN_COORDINATE_VALUE
+            && self.y <= MAX_COORDINATE_VALUE
+    }
 }
 
 impl Point {
@@ -40,7 +59,9 @@ impl Point {
 
 impl PartialEq for Point {
     fn eq(&self, other: &Self) -> bool {
-        (self.x - other.x).abs() < 1e-6 && (self.y - other.y).abs() < 1e-6
+        // Use epsilon comparison for floating point equality
+        const EPSILON: f64 = 1e-6;
+        (self.x - other.x).abs() < EPSILON && (self.y - other.y).abs() < EPSILON
     }
 }
 
@@ -48,9 +69,31 @@ impl Eq for Point {}
 
 impl std::hash::Hash for Point {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Hash as integers to avoid floating point precision issues
-        ((self.x * 1_000_000.0) as i64).hash(state);
-        ((self.y * 1_000_000.0) as i64).hash(state);
+        // Round to 6 decimal places for consistent hashing
+        // This matches the epsilon used in PartialEq
+        let x_rounded = (self.x * 1_000_000.0).round() as i64;
+        let y_rounded = (self.y * 1_000_000.0).round() as i64;
+
+        x_rounded.hash(state);
+        y_rounded.hash(state);
+    }
+}
+
+// Alternative: Use OrderedFloat wrapper for HashMap keys
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PointKey {
+    x: OrderedFloat<f64>,
+    y: OrderedFloat<f64>,
+}
+
+impl From<&Point> for PointKey {
+    fn from(point: &Point) -> Self {
+        // Round to avoid floating point precision issues
+        const PRECISION: f64 = 1_000_000.0;
+        PointKey {
+            x: OrderedFloat((point.x * PRECISION).round() / PRECISION),
+            y: OrderedFloat((point.y * PRECISION).round() / PRECISION),
+        }
     }
 }
 
@@ -89,6 +132,12 @@ struct DetectRoomsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
 struct HealthResponse {
     status: String,
     version: String,
@@ -103,8 +152,28 @@ async fn health_check() -> impl IntoResponse {
 
 async fn detect_rooms_handler(
     Json(request): Json<DetectRoomsRequest>,
-) -> Result<Json<DetectRoomsResponse>, StatusCode> {
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Received detection request with {} lines", request.lines.len());
+
+    // Validate input size to prevent DoS
+    if request.lines.len() > MAX_LINES {
+        warn!(
+            "Request rejected: too many lines ({} > {})",
+            request.lines.len(),
+            MAX_LINES
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: format!(
+                    "Too many lines. Maximum allowed: {}. Received: {}",
+                    MAX_LINES,
+                    request.lines.len()
+                ),
+            }),
+        ));
+    }
 
     if request.lines.is_empty() {
         warn!("Empty lines input");
@@ -112,6 +181,39 @@ async fn detect_rooms_handler(
             rooms: vec![],
             total_rooms: 0,
         }));
+    }
+
+    // Validate area threshold
+    if !request.area_threshold.is_finite() || request.area_threshold < 0.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INVALID_THRESHOLD".to_string(),
+                message: "Area threshold must be a positive finite number".to_string(),
+            }),
+        ));
+    }
+
+    // Validate all points
+    for (idx, line) in request.lines.iter().enumerate() {
+        if !line.start.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid start point in line {}: coordinates must be finite and within [{}, {}]", idx, MIN_COORDINATE_VALUE, MAX_COORDINATE_VALUE),
+                }),
+            ));
+        }
+        if !line.end.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid end point in line {}: coordinates must be finite and within [{}, {}]", idx, MIN_COORDINATE_VALUE, MAX_COORDINATE_VALUE),
+                }),
+            ));
+        }
     }
 
     // Build graph from lines
@@ -140,16 +242,36 @@ async fn main() {
 
     info!("Starting Floorplan Backend Server");
 
-    // Configure CORS
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST])
-        .allow_headers([header::CONTENT_TYPE]);
+    // Configure CORS from environment or use localhost for development
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080".to_string());
 
-    // Build router
+    info!("Allowed CORS origins: {}", allowed_origins);
+
+    let origins: Vec<_> = allowed_origins
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    let cors = if origins.is_empty() {
+        // Fallback to Any only if no valid origins configured (not recommended for production)
+        warn!("No valid CORS origins configured, allowing all origins (NOT SECURE FOR PRODUCTION)");
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    } else {
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    };
+
+    // Build router with middleware
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB max request size
         .layer(cors);
 
     let addr = "0.0.0.0:3000";

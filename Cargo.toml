@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 petgraph = "0.6"
 nalgebra = "0.33"
 geo = { version = "0.28", features = ["use-serde"] }
+ordered-float = "4.2"
 
 # AWS SDK
 aws-config = "1.5"
