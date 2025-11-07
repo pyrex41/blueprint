@@ -1,0 +1,24 @@
+[package]
+name = "axum-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+petgraph.workspace = true
+nalgebra.workspace = true
+geo.workspace = true
+aws-config.workspace = true
+aws-sdk-textract.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
