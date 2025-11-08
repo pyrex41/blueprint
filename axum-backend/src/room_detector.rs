@@ -198,10 +198,11 @@ fn is_valid_cycle(cycle: &[NodeIndex], graph: &FloorplanGraph) -> bool {
 }
 
 /// Filter cycles to only include those that represent potential room boundaries
-/// - Must have exactly 4 sides (most rooms are rectangular)
+/// - Must have at least 3 sides (minimum polygon)
 /// - Must be valid (all edges exist)
+/// - Filters out the outer boundary (largest area cycle)
 fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
-    let mut filtered_cycles: Vec<Vec<NodeIndex>> = Vec::new();
+    let mut valid_cycles: Vec<Vec<NodeIndex>> = Vec::new();
 
     for cycle in cycles {
         // Must be valid
@@ -209,19 +210,63 @@ fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph) -> Ve
             continue;
         }
 
-        // Must have exactly 4 sides (excluding closing node) - typical for rectangular rooms
+        // Must have at least 3 sides (excluding closing node) - minimum for a polygon
         let cycle_len = if cycle.len() > 1 && cycle[0] == cycle[cycle.len() - 1] {
             cycle.len() - 1 // Don't count closing node
         } else {
             cycle.len()
         };
 
-        if cycle_len == 4 {
-            filtered_cycles.push(cycle);
+        if cycle_len >= 3 {
+            valid_cycles.push(cycle);
         }
     }
 
-    filtered_cycles
+    // Filter out the outer boundary (largest area)
+    if valid_cycles.len() <= 1 {
+        return valid_cycles; // If only one cycle, it's the only room
+    }
+
+    // Calculate areas for all cycles
+    let mut cycle_areas: Vec<(usize, f64)> = valid_cycles
+        .iter()
+        .enumerate()
+        .map(|(idx, cycle)| {
+            let points: Vec<Point> = cycle
+                .iter()
+                .filter_map(|&node_idx| {
+                    if node_idx.index() < graph.node_count() {
+                        Some(graph[node_idx].clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let area = calculate_polygon_area(&points);
+            (idx, area)
+        })
+        .collect();
+
+    // Sort by area descending
+    cycle_areas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Find the largest area
+    let largest_area = cycle_areas[0].1;
+
+    // Remove the largest cycle (outer boundary) if it's significantly larger
+    // Keep it if there are multiple cycles with similar area (indicates no clear outer boundary)
+    let area_ratio_threshold = 1.5; // Outer boundary should be at least 50% larger
+
+    if cycle_areas.len() >= 2 && largest_area > cycle_areas[1].1 * area_ratio_threshold {
+        // Remove the largest (outer boundary)
+        cycle_areas.remove(0);
+    }
+
+    // Return filtered cycles in original order
+    cycle_areas
+        .into_iter()
+        .map(|(idx, _)| valid_cycles[idx].clone())
+        .collect()
 }
 
 
@@ -996,5 +1041,75 @@ mod tests {
         let rooms = detect_rooms_simple(&lines, 100.0);
 
         assert_eq!(rooms.len(), 2, "Duplicate dividers should be merged");
+    }
+
+    // ===== Tests for complex polygon detection =====
+
+    #[test]
+    fn test_cycle_detection_pentagon() {
+        // Pentagon shape (5 vertices)
+        let lines = vec![
+            Line { start: Point { x: 50.0, y: 0.0 }, end: Point { x: 100.0, y: 40.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 40.0 }, end: Point { x: 80.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 80.0, y: 100.0 }, end: Point { x: 20.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 20.0, y: 100.0 }, end: Point { x: 0.0, y: 40.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 40.0 }, end: Point { x: 50.0, y: 0.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let rooms = detect_rooms(&graph, 10.0);
+
+        assert!(rooms.len() > 0, "Should detect pentagon room");
+        if let Some(room) = rooms.first() {
+            assert_eq!(room.points.len(), 6, "Pentagon should have 5 vertices + closing point");
+        }
+    }
+
+    #[test]
+    fn test_cycle_detection_hexagon() {
+        // Regular hexagon (6 vertices)
+        let lines = vec![
+            Line { start: Point { x: 50.0, y: 0.0 }, end: Point { x: 100.0, y: 25.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 25.0 }, end: Point { x: 100.0, y: 75.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 75.0 }, end: Point { x: 50.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 50.0, y: 100.0 }, end: Point { x: 0.0, y: 75.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 75.0 }, end: Point { x: 0.0, y: 25.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 25.0 }, end: Point { x: 50.0, y: 0.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let rooms = detect_rooms(&graph, 10.0);
+
+        assert!(rooms.len() > 0, "Should detect hexagon room");
+        if let Some(room) = rooms.first() {
+            assert_eq!(room.points.len(), 7, "Hexagon should have 6 vertices + closing point");
+        }
+    }
+
+    #[test]
+    fn test_cycle_detection_outer_boundary_filter() {
+        // Outer boundary + one inner room
+        let lines = vec![
+            // Outer boundary (large)
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 400.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 400.0, y: 0.0 }, end: Point { x: 400.0, y: 400.0 }, is_load_bearing: false },
+            Line { start: Point { x: 400.0, y: 400.0 }, end: Point { x: 0.0, y: 400.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 400.0 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+            // Inner room (much smaller)
+            Line { start: Point { x: 100.0, y: 100.0 }, end: Point { x: 150.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 150.0, y: 100.0 }, end: Point { x: 150.0, y: 150.0 }, is_load_bearing: false },
+            Line { start: Point { x: 150.0, y: 150.0 }, end: Point { x: 100.0, y: 150.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 150.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let rooms = detect_rooms(&graph, 100.0);
+
+        // Should filter out outer boundary, keep only inner room
+        assert_eq!(rooms.len(), 1, "Should detect only inner room, outer boundary filtered");
+        if let Some(room) = rooms.first() {
+            // Inner room is 50x50 = 2500 area
+            assert!((room.area - 2500.0).abs() < 100.0, "Should be the smaller inner room");
+        }
     }
 }
