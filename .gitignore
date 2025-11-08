@@ -5,6 +5,7 @@
 
 # Trunk/WASM
 /dist
+leptos-frontend/dist
 .trunk
 
 # IDE
