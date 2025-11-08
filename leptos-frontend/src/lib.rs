@@ -1,9 +1,9 @@
-use leptos::*;
+use leptos::prelude::*;
+use leptos::task::spawn_local;
 use leptos_meta::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlInputElement};
 
 mod canvas;
 use canvas::*;
@@ -107,47 +107,120 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn FloorplanDetector() -> impl IntoView {
-    let (lines, set_lines) = create_signal(Vec::<Line>::new());
-    let (rooms, set_rooms) = create_signal(Vec::<Room>::new());
-    let (loading, set_loading) = create_signal(false);
-    let (error, set_error) = create_signal(Option::<String>::None);
-    let (area_threshold, set_area_threshold) = create_signal(100.0);
-    let (door_threshold, set_door_threshold) = create_signal(50.0);
-    let (strategy, set_strategy) = create_signal(DetectionStrategy::GraphOnly);
-    let (method_used, set_method_used) = create_signal(Option::<String>::None);
-    let (execution_time, set_execution_time) = create_signal(Option::<u64>::None);
+    let lines = RwSignal::new(Vec::<Line>::new());
+    let rooms = RwSignal::new(Vec::<Room>::new());
+    let loading = RwSignal::new(false);
+    let error = RwSignal::new(Option::<String>::None);
+    let area_threshold = RwSignal::new(100.0);
+    let door_threshold = RwSignal::new(50.0);
+    let strategy = RwSignal::new(DetectionStrategy::GraphOnly);
+    let method_used = RwSignal::new(Option::<String>::None);
+    let execution_time = RwSignal::new(Option::<u64>::None);
 
-    let file_input_ref = create_node_ref::<html::Input>();
-    let canvas_ref = create_node_ref::<html::Canvas>();
+    let file_input_ref = NodeRef::<leptos::html::Input>::new();
+    let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
-    // Handle file upload
+    // Handle file upload (both JSON and images)
     let on_file_change = move |_| {
         if let Some(input) = file_input_ref.get() {
             if let Some(files) = input.files() {
                 if let Some(file) = files.get(0) {
-                    let reader = web_sys::FileReader::new().unwrap();
-                    let reader_clone = reader.clone();
+                    let file_type = file.type_();
+                    let file_name = file.name();
 
-                    let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                        if let Ok(result) = reader_clone.result() {
-                            if let Some(text) = result.as_string() {
-                                match serde_json::from_str::<Vec<Line>>(&text) {
-                                    Ok(parsed_lines) => {
-                                        set_lines.set(parsed_lines);
-                                        set_error.set(None);
-                                    }
-                                    Err(e) => {
-                                        set_error.set(Some(format!("Failed to parse JSON: {}", e)));
+                    // Check if it's a JSON file
+                    if file_name.ends_with(".json") || file_type == "application/json" {
+                        // Handle JSON file
+                        let reader = web_sys::FileReader::new().unwrap();
+                        let reader_clone = reader.clone();
+
+                        let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                            if let Ok(result) = reader_clone.result() {
+                                if let Some(text) = result.as_string() {
+                                    match serde_json::from_str::<Vec<Line>>(&text) {
+                                        Ok(parsed_lines) => {
+                                            lines.set(parsed_lines);
+                                            error.set(None);
+                                        }
+                                        Err(e) => {
+                                            error.set(Some(format!("Failed to parse JSON: {}", e)));
+                                        }
                                     }
                                 }
                             }
-                        }
-                    }) as Box<dyn FnMut(_)>);
+                        }) as Box<dyn FnMut(_)>);
 
-                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-                    onload.forget();
+                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                        onload.forget();
+                        let _ = reader.read_as_text(&file);
+                    }
+                    // Check if it's an image file
+                    else if file_type.starts_with("image/") {
+                        // Handle image file - read as base64 and send to /upload-image endpoint
+                        loading.set(true);
+                        error.set(None);
 
-                    let _ = reader.read_as_text(&file);
+                        let reader = web_sys::FileReader::new().unwrap();
+                        let reader_clone = reader.clone();
+
+                        let current_area_threshold = area_threshold.get();
+                        let current_door_threshold = door_threshold.get();
+
+                        let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                            if let Ok(result) = reader_clone.result() {
+                                if let Some(data_url) = result.as_string() {
+                                    // Extract base64 data (remove "data:image/...;base64," prefix)
+                                    if let Some(base64_data) = data_url.split(',').nth(1) {
+                                        let base64_owned = base64_data.to_string();
+
+                                        spawn_local(async move {
+                                            #[derive(Serialize)]
+                                            struct UploadImageRequest {
+                                                image: String,
+                                                area_threshold: f64,
+                                                door_threshold: Option<f64>,
+                                            }
+
+                                            let request = UploadImageRequest {
+                                                image: base64_owned,
+                                                area_threshold: current_area_threshold,
+                                                door_threshold: Some(current_door_threshold),
+                                            };
+
+                                            match send_image_request(request).await {
+                                                Ok(response) => {
+                                                    // Extract rooms from response
+                                                    if let Some(rooms_array) = response.get("rooms") {
+                                                        if let Ok(parsed_rooms) = serde_json::from_value::<Vec<Room>>(rooms_array.clone()) {
+                                                            rooms.set(parsed_rooms);
+                                                        }
+                                                    }
+                                                    // Extract lines for visualization
+                                                    if let Some(lines_count) = response.get("lines_extracted") {
+                                                        // Note: We don't get the actual lines back from /upload-image
+                                                        // So we just clear the lines display
+                                                        lines.set(Vec::new());
+                                                    }
+                                                    loading.set(false);
+                                                    error.set(None);
+                                                }
+                                                Err(e) => {
+                                                    error.set(Some(format!("Image upload failed: {}", e)));
+                                                    loading.set(false);
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }) as Box<dyn FnMut(_)>);
+
+                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                        onload.forget();
+                        let _ = reader.read_as_data_url(&file);
+                    } else {
+                        error.set(Some("Please upload a JSON or image file".to_string()));
+                    }
                 }
             }
         }
@@ -157,22 +230,24 @@ fn FloorplanDetector() -> impl IntoView {
     let on_detect = move |_| {
         let current_lines = lines.get();
         if current_lines.is_empty() {
-            set_error.set(Some("Please upload a JSON file first".to_string()));
+            error.set(Some("Please upload a JSON file first".to_string()));
             return;
         }
 
-        set_loading.set(true);
-        set_error.set(None);
-        set_method_used.set(None);
-        set_execution_time.set(None);
+        loading.set(true);
+        error.set(None);
+        method_used.set(None);
+        execution_time.set(None);
 
         let current_strategy = strategy.get();
+        let current_area_threshold = area_threshold.get();
+        let current_door_threshold = door_threshold.get();
 
         spawn_local(async move {
             let request = DetectRequest {
                 lines: current_lines,
-                area_threshold: area_threshold.get(),
-                door_threshold: Some(door_threshold.get()),
+                area_threshold: current_area_threshold,
+                door_threshold: Some(current_door_threshold),
                 strategy: current_strategy.as_str().to_string(),
                 enable_vision: Some(current_strategy == DetectionStrategy::GraphWithVision),
                 enable_yolo: Some(current_strategy == DetectionStrategy::YoloOnly),
@@ -180,25 +255,25 @@ fn FloorplanDetector() -> impl IntoView {
 
             match detect_rooms(request).await {
                 Ok(response) => {
-                    set_rooms.set(response.rooms);
-                    set_method_used.set(response.method_used);
-                    set_execution_time.set(response.execution_time_ms);
-                    set_loading.set(false);
+                    rooms.set(response.rooms);
+                    method_used.set(response.method_used);
+                    execution_time.set(response.execution_time_ms);
+                    loading.set(false);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Detection failed: {}", e)));
-                    set_loading.set(false);
+                    error.set(Some(format!("Detection failed: {}", e)));
+                    loading.set(false);
                 }
             }
         });
     };
 
     // Render canvas whenever lines or rooms change
-    create_effect(move |_| {
+    Effect::new(move |_| {
         let current_lines = lines.get();
         let current_rooms = rooms.get();
 
-        if let Some(canvas) = canvas_ref.get() {
+        if let Some(canvas) = canvas_ref.get_untracked() {
             render_floorplan(&canvas, &current_lines, &current_rooms);
         }
     });
@@ -212,11 +287,11 @@ fn FloorplanDetector() -> impl IntoView {
 
             <div class="controls">
                 <div class="file-upload">
-                    <label for="file-input">"Upload Blueprint JSON:"</label>
+                    <label for="file-input">"Upload Blueprint (JSON or Image):"</label>
                     <input
                         type="file"
                         id="file-input"
-                        accept=".json"
+                        accept=".json,.png,.jpg,.jpeg"
                         node_ref=file_input_ref
                         on:change=on_file_change
                     />
@@ -227,7 +302,7 @@ fn FloorplanDetector() -> impl IntoView {
                     <select
                         id="strategy"
                         on:change=move |ev| {
-                            let val = event_target_value(&ev);
+                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlSelectElement>().value();
                             let new_strategy = match val.as_str() {
                                 "GraphOnly" => DetectionStrategy::GraphOnly,
                                 "GraphWithVision" => DetectionStrategy::GraphWithVision,
@@ -236,7 +311,7 @@ fn FloorplanDetector() -> impl IntoView {
                                 "Ensemble" => DetectionStrategy::Ensemble,
                                 _ => DetectionStrategy::GraphOnly,
                             };
-                            set_strategy.set(new_strategy);
+                            strategy.set(new_strategy);
                         }
                     >
                         <option value="GraphOnly" selected>"Graph Only (Fast)"</option>
@@ -255,10 +330,11 @@ fn FloorplanDetector() -> impl IntoView {
                     <input
                         type="number"
                         id="threshold"
-                        value=move || area_threshold.get()
+                        prop:value=move || area_threshold.get()
                         on:input=move |ev| {
-                            if let Ok(val) = event_target_value(&ev).parse::<f64>() {
-                                set_area_threshold.set(val);
+                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value();
+                            if let Ok(parsed) = val.parse::<f64>() {
+                                area_threshold.set(parsed);
                             }
                         }
                     />
@@ -269,10 +345,11 @@ fn FloorplanDetector() -> impl IntoView {
                     <input
                         type="number"
                         id="door-threshold"
-                        value=move || door_threshold.get()
+                        prop:value=move || door_threshold.get()
                         on:input=move |ev| {
-                            if let Ok(val) = event_target_value(&ev).parse::<f64>() {
-                                set_door_threshold.set(val);
+                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value();
+                            if let Ok(parsed) = val.parse::<f64>() {
+                                door_threshold.set(parsed);
                             }
                         }
                     />
@@ -292,6 +369,7 @@ fn FloorplanDetector() -> impl IntoView {
                     {err}
                 </div>
             })}
+
 
             <div class="stats">
                 <p>"Lines: " {move || lines.get().len()}</p>
@@ -318,34 +396,54 @@ fn FloorplanDetector() -> impl IntoView {
                 <For
                     each=move || rooms.get()
                     key=|room| room.id
-                    children=move |room: Room| {
-                        view! {
-                            <div class="room-card">
-                                <h3>{format!("Room {}: {}", room.id,
-                                    room.room_type.as_ref().unwrap_or(&room.name_hint))}</h3>
-                                <p>"Area: " {format!("{:.2}", room.area)}</p>
-                                <p>"Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}]"
-                                    room.bounding_box[0]
-                                    room.bounding_box[1]
-                                    room.bounding_box[2]
-                                    room.bounding_box[3]
-                                </p>
-                                {room.confidence.map(|conf| view! {
-                                    <p>"Confidence: " {format!("{:.0}%", conf * 100.0)}</p>
-                                })}
-                                {(!room.features.is_empty()).then(|| view! {
-                                    <p>"Features: " {room.features.join(", ")}</p>
-                                })}
-                                {room.detection_method.as_ref().map(|method| view! {
-                                    <p style="font-size: 12px; color: #888;">"Detected by: " {method}</p>
-                                })}
-                            </div>
-                        }
-                    }
-                />
+                    let:room
+                >
+                    <div class="room-card">
+                        <h3>{format!("Room {}: {}", room.id,
+                            room.room_type.as_ref().unwrap_or(&room.name_hint))}</h3>
+                        <p>"Area: " {format!("{:.2}", room.area)}</p>
+                        <p>"Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}]"
+                            room.bounding_box[0]
+                            room.bounding_box[1]
+                            room.bounding_box[2]
+                            room.bounding_box[3]
+                        </p>
+                        {room.confidence.map(|conf| view! {
+                            <p>"Confidence: " {format!("{:.0}%", conf * 100.0)}</p>
+                        })}
+                        {(!room.features.is_empty()).then(|| view! {
+                            <p>"Features: " {room.features.join(", ")}</p>
+                        })}
+                        {room.detection_method.as_ref().map(|method| view! {
+                            <p style="font-size: 12px; color: #888;">"Detected by: " {method.clone()}</p>
+                        })}
+                    </div>
+                </For>
             </div>
         </div>
     }
+}
+
+async fn send_image_request<T: Serialize>(request: T) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post("http://localhost:3000/upload-image")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Server error ({}): {}", status, error_text));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))
 }
 
 async fn detect_rooms(request: DetectRequest) -> Result<DetectResponse, String> {
@@ -368,4 +466,10 @@ async fn detect_rooms(request: DetectRequest) -> Result<DetectResponse, String> 
         .json::<DetectResponse>()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[wasm_bindgen(start)]
+pub fn main() {
+    console_error_panic_hook::set_once();
+    leptos::mount::mount_to_body(App);
 }

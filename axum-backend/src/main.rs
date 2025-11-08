@@ -15,6 +15,7 @@ use tracing::{info, warn};
 mod graph_builder;
 mod room_detector;
 mod detector_orchestrator;
+mod image_vectorizer;
 
 use graph_builder::*;
 use room_detector::*;
@@ -355,6 +356,79 @@ async fn enhanced_detect_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct UploadImageRequest {
+    /// Base64 encoded image (PNG or JPEG)
+    image: String,
+    /// Area threshold for room detection
+    #[serde(default = "default_area_threshold")]
+    area_threshold: f64,
+    /// Door gap bridging threshold
+    #[serde(default)]
+    door_threshold: Option<f64>,
+}
+
+async fn upload_image_handler(
+    Json(payload): Json<UploadImageRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received image upload request");
+
+    // Decode base64 image
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&payload.image)
+        .map_err(|e| {
+            warn!("Failed to decode base64 image: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_IMAGE".to_string(),
+                    message: format!("Failed to decode base64 image: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Image decoded, size: {} bytes", image_bytes.len());
+
+    // Vectorize image to extract lines
+    let extracted_lines = image_vectorizer::vectorize_image(&image_bytes).map_err(|e| {
+        warn!("Vectorization failed: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "VECTORIZATION_FAILED".to_string(),
+                message: format!("Failed to vectorize image: {}", e),
+            }),
+        )
+    })?;
+
+    info!("Vectorization complete, extracted {} lines", extracted_lines.len());
+
+    // Convert to Line format expected by detection algorithm
+    let lines: Vec<Line> = extracted_lines
+        .into_iter()
+        .map(|l| Line {
+            start: crate::Point { x: l.start.x, y: l.start.y },
+            end: crate::Point { x: l.end.x, y: l.end.y },
+            is_load_bearing: l.is_load_bearing,
+        })
+        .collect();
+
+    // Build graph with door detection
+    let door_threshold = payload.door_threshold.unwrap_or(50.0);
+    let graph = build_graph_with_door_threshold(&lines, door_threshold);
+
+    // Detect rooms
+    let rooms = detect_rooms(&graph, payload.area_threshold);
+    info!("Detected {} rooms", rooms.len());
+
+    Ok(Json(serde_json::json!({
+        "total_rooms": rooms.len(),
+        "rooms": rooms,
+        "lines_extracted": lines.len(),
+        "vectorization_complete": true,
+    })))
+}
+
 /// Create the Axum app with all routes and middleware
 /// This is exposed for integration testing
 pub fn create_app() -> Router {
@@ -384,6 +458,7 @@ pub fn create_app() -> Router {
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
+        .route("/upload-image", post(upload_image_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
         .layer(cors)
 }

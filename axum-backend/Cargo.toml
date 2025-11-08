@@ -20,6 +20,8 @@ ordered-float.workspace = true
 aws-config.workspace = true
 aws-sdk-textract.workspace = true
 image.workspace = true
+vtracer.workspace = true
+visioncortex.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 vision-classifier = { path = "../vision-classifier" }

@@ -1,0 +1,32 @@
+[
+  {
+    "start": {"x": 0.0, "y": 0.0},
+    "end": {"x": 400.0, "y": 0.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 400.0, "y": 0.0},
+    "end": {"x": 400.0, "y": 300.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 400.0, "y": 300.0},
+    "end": {"x": 0.0, "y": 300.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 0.0, "y": 300.0},
+    "end": {"x": 0.0, "y": 0.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 200.0, "y": 0.0},
+    "end": {"x": 200.0, "y": 140.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 200.0, "y": 160.0},
+    "end": {"x": 200.0, "y": 300.0},
+    "is_load_bearing": false
+  }
+]
