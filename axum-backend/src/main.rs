@@ -1,18 +1,13 @@
 use axum::{
-    body::Body,
     extract::{DefaultBodyLimit, Json},
     http::{header, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Router,
 };
-use geo::{Area, Polygon as GeoPolygon};
 use nalgebra::Point2;
 use ordered_float::OrderedFloat;
-use petgraph::graph::{Graph, NodeIndex};
-use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
@@ -230,6 +225,38 @@ async fn detect_rooms_handler(
     }))
 }
 
+/// Create the Axum app with all routes and middleware
+/// This is exposed for integration testing
+pub fn create_app() -> Router {
+    // Configure CORS from environment or use localhost for development
+    let allowed_origins = std::env::var("ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080".to_string());
+
+    let origins: Vec<_> = allowed_origins
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    let cors = if origins.is_empty() {
+        // Fallback to Any only if no valid origins configured (not recommended for production)
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    } else {
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    };
+
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/detect", post(detect_rooms_handler))
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB max request size
+        .layer(cors)
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing
@@ -242,37 +269,7 @@ async fn main() {
 
     info!("Starting Floorplan Backend Server");
 
-    // Configure CORS from environment or use localhost for development
-    let allowed_origins = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080".to_string());
-
-    info!("Allowed CORS origins: {}", allowed_origins);
-
-    let origins: Vec<_> = allowed_origins
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-
-    let cors = if origins.is_empty() {
-        // Fallback to Any only if no valid origins configured (not recommended for production)
-        warn!("No valid CORS origins configured, allowing all origins (NOT SECURE FOR PRODUCTION)");
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST])
-            .allow_headers([header::CONTENT_TYPE])
-    } else {
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods([Method::GET, Method::POST])
-            .allow_headers([header::CONTENT_TYPE])
-    };
-
-    // Build router with middleware
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/detect", post(detect_rooms_handler))
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB max request size
-        .layer(cors);
+    let app = create_app();
 
     let addr = "0.0.0.0:3000";
     info!("Server listening on {}", addr);

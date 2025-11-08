@@ -2,7 +2,8 @@ use crate::{graph_builder::FloorplanGraph, Point, Room};
 use geo::{Area, Coord, LineString, Polygon as GeoPolygon};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+use tracing::{warn, debug};
 
 // Maximum number of cycles to detect (prevent DoS)
 const MAX_CYCLES: usize = 1000;
@@ -11,7 +12,7 @@ const MAX_CYCLE_LENGTH: usize = 100;
 
 /// Detect rooms in a floorplan graph by finding cycles
 pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
-    let cycles = find_all_cycles(graph);
+    let cycles = find_room_cycles(graph);
     let mut rooms = Vec::new();
 
     for (id, cycle_nodes) in cycles.iter().enumerate() {
@@ -51,80 +52,179 @@ pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
     rooms
 }
 
-/// Find all simple cycles in the undirected graph using improved DFS
-/// This implementation properly handles undirected graphs and limits search to prevent DoS
-fn find_all_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
+/// Find all simple cycles in the undirected graph using DFS-based cycle enumeration
+/// Returns all valid cycles without filtering
+pub fn find_all_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
     let mut all_cycles = Vec::new();
-    let mut visited = HashSet::new();
 
-    // Try starting from each node
+    // For each node, start DFS to find cycles
     for start_node in graph.node_indices() {
         if all_cycles.len() >= MAX_CYCLES {
-            break; // Limit total cycles to prevent DoS
-        }
-
-        // Find cycles starting from this node
-        let cycles_from_node = find_cycles_from_node(graph, start_node, &mut visited);
-        all_cycles.extend(cycles_from_node);
-    }
-
-    // Deduplicate cycles (same cycle traversed differently)
-    deduplicate_cycles(all_cycles)
-}
-
-/// Find cycles starting from a specific node using BFS-based approach
-/// This is more robust for undirected graphs than the previous DFS approach
-fn find_cycles_from_node(
-    graph: &FloorplanGraph,
-    start: NodeIndex,
-    global_visited: &mut HashSet<NodeIndex>,
-) -> Vec<Vec<NodeIndex>> {
-    if global_visited.contains(&start) {
-        return Vec::new();
-    }
-
-    let mut cycles = Vec::new();
-    let mut stack = Vec::new();
-    let mut visited = HashSet::new();
-
-    // Start DFS from the start node
-    stack.push((start, None, vec![start]));
-    visited.insert(start);
-
-    while let Some((current, parent, path)) = stack.pop() {
-        if cycles.len() >= MAX_CYCLES {
+            debug!("Reached maximum cycle limit ({})", MAX_CYCLES);
             break;
         }
 
-        if path.len() > MAX_CYCLE_LENGTH {
-            continue; // Skip overly long paths
+        debug!("Starting cycle detection from node {:?}", start_node);
+        let cycles = find_cycles_from_node_dfs(graph, start_node);
+        all_cycles.extend(cycles);
+    }
+
+    // Deduplicate cycles
+    deduplicate_cycles(all_cycles)
+}
+
+/// Find cycles that could represent room boundaries (filtered version)
+fn find_room_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
+    let all_cycles = find_all_cycles(graph);
+
+    // Filter to only include cycles that are large enough to be rooms (exactly 4 sides)
+    filter_room_cycles(all_cycles, graph)
+}
+
+/// Find all cycles starting from a given node using DFS
+/// This enumerates all simple cycles reachable from the start node
+fn find_cycles_from_node_dfs(
+    graph: &FloorplanGraph,
+    start: NodeIndex,
+) -> Vec<Vec<NodeIndex>> {
+    let mut cycles = Vec::new();
+    let mut path = Vec::new();
+    let mut path_set = HashSet::new();
+
+    // Start DFS from the start node
+    dfs_cycle_find(graph, start, &mut path, &mut path_set, &mut cycles);
+
+    cycles
+}
+
+/// DFS function to find cycles
+/// Only finds cycles that return to the start node (proper simple cycles)
+fn dfs_cycle_find(
+    graph: &FloorplanGraph,
+    current: NodeIndex,
+    path: &mut Vec<NodeIndex>,
+    path_set: &mut HashSet<NodeIndex>,
+    cycles: &mut Vec<Vec<NodeIndex>>,
+) {
+    // Add current node to path
+    path.push(current);
+    path_set.insert(current);
+
+    // Explore neighbors
+    for edge in graph.edges(current) {
+        // For undirected graph, get the "other" node (not current)
+        let neighbor = if edge.source() == current {
+            edge.target()
+        } else {
+            edge.source()
+        };
+
+        if !path_set.contains(&neighbor) {
+            // Neighbor not in current path, continue DFS
+            dfs_cycle_find(graph, neighbor, path, path_set, cycles);
+        } else if path.len() >= 3 && neighbor == path[0] {
+            // Found cycle back to start node - validate it's a proper cycle
+            let mut cycle = path.clone();
+            cycle.push(path[0]); // Close the cycle
+            if cycle.len() <= MAX_CYCLE_LENGTH && is_valid_cycle(&cycle, graph) {
+                cycles.push(cycle);
+            }
+        }
+        // Ignore other back edges - they don't form valid simple cycles from the start
+    }
+
+    // Backtrack
+    path.pop();
+    path_set.remove(&current);
+}
+
+/// Reconstruct a cycle path from start to end using parent map
+fn reconstruct_cycle(
+    start: NodeIndex,
+    end: NodeIndex,
+    parent_map: &HashMap<NodeIndex, NodeIndex>,
+) -> Vec<NodeIndex> {
+    let mut path = vec![start];
+    let mut current = end;
+
+    // Trace back from end to start
+    while current != start {
+        path.push(current);
+        if let Some(&parent) = parent_map.get(&current) {
+            current = parent;
+        } else {
+            // No path found, return empty
+            warn!("Failed to reconstruct cycle: no parent found for node {:?} when tracing from {:?} to {:?}", current, end, start);
+            return Vec::new();
         }
 
-        // Check all neighbors
-        for neighbor_edge in graph.edges(current) {
-            let neighbor = neighbor_edge.target();
-
-            // Skip parent to avoid immediate backtracking
-            if Some(neighbor) == parent {
-                continue;
-            }
-
-            if neighbor == start && path.len() >= 3 {
-                // Found a cycle back to start
-                cycles.push(path.clone());
-            } else if !visited.contains(&neighbor) {
-                // Continue exploring
-                let mut new_path = path.clone();
-                new_path.push(neighbor);
-                stack.push((neighbor, Some(current), new_path));
-                visited.insert(neighbor);
-            }
+        // Safety check for infinite loops
+        if path.len() > MAX_CYCLE_LENGTH {
+            warn!("Cycle reconstruction exceeded maximum length ({}) for cycle from {:?} to {:?}", MAX_CYCLE_LENGTH, start, end);
+            return Vec::new();
         }
     }
 
-    global_visited.insert(start);
-    cycles
+    path.reverse();
+    path
 }
+
+/// Check if a cycle is valid (all consecutive nodes are connected by edges)
+fn is_valid_cycle(cycle: &[NodeIndex], graph: &FloorplanGraph) -> bool {
+    if cycle.len() < 3 {
+        return false;
+    }
+
+    for i in 0..cycle.len() - 1 {
+        let a = cycle[i];
+        let b = cycle[i + 1];
+
+        // Check if b is a neighbor of a
+        let mut found = false;
+        for edge in graph.edges(a) {
+            let neighbor = if edge.source() == a { edge.target() } else { edge.source() };
+            if neighbor == b {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Filter cycles to only include those that represent potential room boundaries
+/// - Must have exactly 4 sides (most rooms are rectangular)
+/// - Must be valid (all edges exist)
+fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
+    let mut filtered_cycles: Vec<Vec<NodeIndex>> = Vec::new();
+
+    for cycle in cycles {
+        // Must be valid
+        if !is_valid_cycle(&cycle, graph) {
+            continue;
+        }
+
+        // Must have exactly 4 sides (excluding closing node) - typical for rectangular rooms
+        let cycle_len = if cycle.len() > 1 && cycle[0] == cycle[cycle.len() - 1] {
+            cycle.len() - 1 // Don't count closing node
+        } else {
+            cycle.len()
+        };
+
+        if cycle_len == 4 {
+            filtered_cycles.push(cycle);
+        }
+    }
+
+    filtered_cycles
+}
+
+
 
 /// Deduplicate cycles that represent the same room
 /// Handles cycles with different starting points and reverse traversals
@@ -151,42 +251,38 @@ fn deduplicate_cycles(cycles: Vec<Vec<NodeIndex>>) -> Vec<Vec<NodeIndex>> {
 /// Create a canonical signature for a cycle to identify duplicates
 /// Handles different starting points and reverse traversals
 fn cycle_signature(cycle: &[NodeIndex]) -> Vec<u32> {
-    let indices: Vec<u32> = cycle.iter().map(|n| n.index() as u32).collect();
-
-    // Find the minimum element position to normalize starting point
-    let min_pos = indices
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, &val)| val)
-        .map(|(pos, _)| pos)
-        .unwrap_or(0);
-
-    // Create normalized forward cycle starting from min element
-    let mut forward: Vec<u32> = indices[min_pos..]
-        .iter()
-        .chain(indices[..min_pos].iter())
-        .copied()
-        .collect();
-
-    // Create normalized reverse cycle
-    let mut reverse: Vec<u32> = indices[min_pos..]
-        .iter()
-        .chain(indices[..min_pos].iter())
-        .rev()
-        .copied()
-        .collect();
-
-    // Rotate reverse to start with min element
-    if let Some(min_pos_rev) = reverse.iter().position(|&x| x == *indices.iter().min().unwrap()) {
-        reverse.rotate_left(min_pos_rev);
+    if cycle.is_empty() {
+        return Vec::new();
     }
 
-    // Return lexicographically smaller signature
-    if forward <= reverse {
-        forward
-    } else {
-        reverse
+    let mut indices: Vec<u32> = cycle.iter().map(|n| n.index() as u32).collect();
+
+    // If the cycle has a closing node (last == first), remove it for signature calculation
+    if indices.len() > 1 && indices[0] == indices[indices.len() - 1] {
+        indices.pop();
     }
+
+    // For cycles, we need to consider all rotations and find the lexicographically smallest
+    // Also consider the reverse direction
+    let n = indices.len();
+    let mut candidates = Vec::new();
+
+    // All rotations of forward direction
+    for i in 0..n {
+        let rotated: Vec<u32> = indices[i..].iter().chain(indices[..i].iter()).copied().collect();
+        candidates.push(rotated);
+    }
+
+    // All rotations of reverse direction
+    let mut reversed = indices.clone();
+    reversed.reverse();
+    for i in 0..n {
+        let rotated: Vec<u32> = reversed[i..].iter().chain(reversed[..i].iter()).copied().collect();
+        candidates.push(rotated);
+    }
+
+    // Return the lexicographically smallest candidate
+    candidates.into_iter().min().unwrap()
 }
 
 /// Calculate the area of a polygon using the Shoelace formula
@@ -329,5 +425,151 @@ mod tests {
         let corridor_area = 800.0;
         let corridor_bbox = [0.0, 0.0, 50.0, 10.0];
         assert_eq!(generate_room_name(corridor_area, &corridor_bbox), "Corridor");
+    }
+
+    #[test]
+    fn test_cycle_detection_multiple_rooms() {
+        // Create two adjacent rooms sharing a wall
+        let lines = vec![
+            // Room 1 (left square)
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 100.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 0.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 100.0 }, end: Point { x: 0.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 100.0 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+            // Room 2 (right square)
+            Line { start: Point { x: 100.0, y: 0.0 }, end: Point { x: 200.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 200.0, y: 0.0 }, end: Point { x: 200.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 200.0, y: 100.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        // Should find all valid cycles in the graph
+        assert_eq!(cycles.len(), 3, "Should detect all valid cycles in the graph");
+
+        // Check that we have the expected cycle lengths
+        let cycle_lengths: Vec<usize> = cycles.iter().map(|c| c.len()).collect();
+        assert!(cycle_lengths.contains(&5), "Should have 5-node cycles");
+        assert!(cycle_lengths.contains(&7), "Should have 7-node cycle");
+    }
+
+    #[test]
+    fn test_cycle_detection_no_duplicates() {
+        // Create a simple square and verify no duplicate cycles are found
+        let lines = vec![
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 100.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 0.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 100.0 }, end: Point { x: 0.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 100.0 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        // Should find exactly 1 cycle (the square)
+        assert_eq!(cycles.len(), 1, "Should detect exactly 1 cycle for a simple square");
+        assert_eq!(cycles[0].len(), 5, "Cycle should have 5 nodes (including closing)");
+    }
+
+    #[test]
+    fn test_cycle_detection_complex_floorplan() {
+        // Create an L-shaped floorplan with two rooms
+        let lines = vec![
+            // Outer boundary
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 200.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 200.0, y: 0.0 }, end: Point { x: 200.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 200.0, y: 100.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 100.0 }, end: Point { x: 100.0, y: 200.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 200.0 }, end: Point { x: 0.0, y: 200.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 200.0 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+            // Internal wall
+            Line { start: Point { x: 100.0, y: 0.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        // Should find the outer boundary cycle
+        assert_eq!(cycles.len(), 1, "Should detect the outer boundary cycle");
+        assert_eq!(cycles[0].len(), 7, "Outer boundary cycle should have 7 nodes (including closing)");
+    }
+
+    #[test]
+    fn test_cycle_detection_empty_graph() {
+        let lines = vec![];
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        assert_eq!(cycles.len(), 0, "Empty graph should have no cycles");
+    }
+
+    #[test]
+    fn test_cycle_detection_single_line() {
+        let lines = vec![
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 100.0, y: 0.0 }, is_load_bearing: false },
+        ];
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        assert_eq!(cycles.len(), 0, "Single line should have no cycles");
+    }
+
+    #[test]
+    fn test_cycle_detection_triangle() {
+        let lines = vec![
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 100.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 0.0 }, end: Point { x: 50.0, y: 86.6 }, is_load_bearing: false },
+            Line { start: Point { x: 50.0, y: 86.6 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let cycles = find_all_cycles(&graph);
+
+        assert_eq!(cycles.len(), 1, "Triangle should have exactly 1 cycle");
+        assert_eq!(cycles[0].len(), 4, "Triangle cycle should have 4 nodes (including closing)");
+    }
+
+    #[test]
+    fn test_deduplicate_cycles() {
+        // Create cycles that are the same but with different starting points
+        let cycle1 = vec![
+            NodeIndex::new(0),
+            NodeIndex::new(1),
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+        ];
+        let cycle2 = vec![
+            NodeIndex::new(1),
+            NodeIndex::new(2),
+            NodeIndex::new(3),
+            NodeIndex::new(0),
+        ]; // Same cycle, different starting point
+        let cycle3 = vec![
+            NodeIndex::new(3),
+            NodeIndex::new(2),
+            NodeIndex::new(1),
+            NodeIndex::new(0),
+        ]; // Reverse of cycle1
+
+        let cycles = vec![cycle1, cycle2, cycle3];
+        let deduplicated = deduplicate_cycles(cycles);
+
+        assert_eq!(deduplicated.len(), 1, "Should deduplicate to exactly 1 unique cycle");
+    }
+
+    #[test]
+    fn test_cycle_signature() {
+        let cycle = vec![
+            NodeIndex::new(3),
+            NodeIndex::new(0),
+            NodeIndex::new(1),
+            NodeIndex::new(2),
+        ];
+
+        let signature = cycle_signature(&cycle);
+        let expected = vec![0u32, 1, 2, 3]; // Should start with minimum element
+
+        assert_eq!(signature, expected, "Signature should be normalized to start with minimum element");
     }
 }

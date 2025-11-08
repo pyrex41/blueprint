@@ -23,3 +23,9 @@ image.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+hyper = "1.0"
+
+# Note: To enable integration tests, refactor main.rs:
+# 1. Move app logic to lib.rs
+# 2. Expose create_app() as public function
+# 3. Create tests/integration_tests.rs with HTTP tests
