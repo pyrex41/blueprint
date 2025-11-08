@@ -18,7 +18,7 @@ mod detector_orchestrator;
 mod image_vectorizer;
 
 use graph_builder::*;
-use room_detector::*;
+use room_detector::{detect_rooms, detect_rooms_simple};
 
 // Security limits to prevent DoS attacks
 const MAX_LINES: usize = 10_000;
@@ -119,6 +119,10 @@ struct DetectRoomsRequest {
     area_threshold: f64,
     #[serde(default = "default_door_threshold")]
     door_threshold: f64,
+    #[serde(default = "default_coverage_threshold")]
+    coverage_threshold: f64,
+    #[serde(default = "default_outer_boundary_ratio")]
+    outer_boundary_ratio: f64,
 }
 
 fn default_area_threshold() -> f64 {
@@ -127,6 +131,14 @@ fn default_area_threshold() -> f64 {
 
 fn default_door_threshold() -> f64 {
     50.0  // Default door gap: 50 units
+}
+
+fn default_coverage_threshold() -> f64 {
+    0.3  // 30% minimum height coverage for vertical dividers
+}
+
+fn default_outer_boundary_ratio() -> f64 {
+    1.5  // Outer boundary must be 1.5x larger than second-largest room
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +164,71 @@ async fn health_check() -> impl IntoResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+async fn detect_rooms_simple_handler(
+    Json(request): Json<DetectRoomsRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received simple detection request with {} lines", request.lines.len());
+
+    // Validate input size
+    if request.lines.len() > MAX_LINES {
+        warn!(
+            "Request rejected: too many lines ({} > {})",
+            request.lines.len(),
+            MAX_LINES
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: format!(
+                    "Too many lines. Maximum allowed: {}. Received: {}",
+                    MAX_LINES,
+                    request.lines.len()
+                ),
+            }),
+        ));
+    }
+
+    if request.lines.is_empty() {
+        warn!("Empty lines input");
+        return Ok(Json(DetectRoomsResponse {
+            rooms: vec![],
+            total_rooms: 0,
+        }));
+    }
+
+    // Validate points
+    for (idx, line) in request.lines.iter().enumerate() {
+        if !line.start.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid start point in line {}", idx),
+                }),
+            ));
+        }
+        if !line.end.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid end point in line {}", idx),
+                }),
+            ));
+        }
+    }
+
+    // Use simplified divider-based detection
+    let rooms = detect_rooms_simple(&request.lines, request.area_threshold, request.coverage_threshold);
+    info!("Detected {} rooms using simple algorithm", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
 }
 
 async fn detect_rooms_handler(
@@ -230,7 +307,7 @@ async fn detect_rooms_handler(
     info!("Built graph with {} nodes and {} edges", graph.node_count(), graph.edge_count());
 
     // Detect rooms (cycles)
-    let rooms = detect_rooms(&graph, request.area_threshold);
+    let rooms = detect_rooms(&graph, request.area_threshold, request.outer_boundary_ratio);
     info!("Detected {} rooms", rooms.len());
 
     Ok(Json(DetectRoomsResponse {
@@ -418,7 +495,7 @@ async fn upload_image_handler(
     let graph = build_graph_with_door_threshold(&lines, door_threshold);
 
     // Detect rooms
-    let rooms = detect_rooms(&graph, payload.area_threshold);
+    let rooms = detect_rooms(&graph, payload.area_threshold, 1.5); // Default outer boundary ratio
     info!("Detected {} rooms", rooms.len());
 
     Ok(Json(serde_json::json!({
@@ -457,6 +534,7 @@ pub fn create_app() -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
+        .route("/detect/simple", post(detect_rooms_simple_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
         .route("/upload-image", post(upload_image_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images

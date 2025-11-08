@@ -146,6 +146,7 @@ impl DetectorOrchestrator {
         let rooms = crate::room_detector::detect_rooms(
             &graph,
             self.config.area_threshold,
+            1.5, // Default outer boundary ratio
         );
 
         let elapsed = start.elapsed().as_millis();
