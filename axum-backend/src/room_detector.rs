@@ -342,6 +342,96 @@ fn generate_room_name(area: f64, bbox: &[f64; 4]) -> String {
     }
 }
 
+/// Simplified room detection for rectangular floorplans with vertical dividers
+/// This algorithm works well for simple cases like test-floorplan.json
+pub fn detect_rooms_simple(lines: &[crate::Line], area_threshold: f64) -> Vec<Room> {
+    if lines.is_empty() {
+        return vec![];
+    }
+
+    // Find overall bounding box
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for line in lines {
+        min_x = min_x.min(line.start.x).min(line.end.x);
+        min_y = min_y.min(line.start.y).min(line.end.y);
+        max_x = max_x.max(line.start.x).max(line.end.x);
+        max_y = max_y.max(line.start.y).max(line.end.y);
+    }
+
+    // Identify vertical dividers (internal walls with constant x)
+    let mut dividers: Vec<f64> = Vec::new();
+    const EPSILON: f64 = 0.1;
+
+    for line in lines {
+        // Check if line is vertical (constant x)
+        if (line.start.x - line.end.x).abs() < EPSILON {
+            let x = line.start.x;
+            // Check if it's internal (not at boundaries)
+            if x > min_x + EPSILON && x < max_x - EPSILON {
+                // Check if it spans a significant portion of the height
+                let line_min_y = line.start.y.min(line.end.y);
+                let line_max_y = line.start.y.max(line.end.y);
+                let coverage = (line_max_y - line_min_y) / (max_y - min_y);
+
+                if coverage > 0.3 {  // At least 30% coverage
+                    if !dividers.iter().any(|&d| (d - x).abs() < EPSILON) {
+                        dividers.push(x);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort dividers by x-coordinate
+    dividers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Create rooms between dividers
+    let mut rooms = Vec::new();
+    let mut x_boundaries = vec![min_x];
+    x_boundaries.extend(dividers);
+    x_boundaries.push(max_x);
+
+    for i in 0..x_boundaries.len() - 1 {
+        let x1 = x_boundaries[i];
+        let x2 = x_boundaries[i + 1];
+
+        // Create rectangular room
+        let points = vec![
+            Point { x: x1, y: min_y },
+            Point { x: x2, y: min_y },
+            Point { x: x2, y: max_y },
+            Point { x: x1, y: max_y },
+        ];
+
+        let area = (x2 - x1) * (max_y - min_y);
+
+        if area >= area_threshold {
+            let bbox = [x1, min_y, x2, max_y];
+            let name_hint = if i == 0 {
+                "Left Room".to_string()
+            } else if i == x_boundaries.len() - 2 {
+                "Right Room".to_string()
+            } else {
+                format!("Room {}", i + 1)
+            };
+
+            rooms.push(Room {
+                id: i,
+                bounding_box: bbox,
+                area,
+                name_hint,
+                points,
+            });
+        }
+    }
+
+    rooms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

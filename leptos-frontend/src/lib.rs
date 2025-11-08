@@ -41,6 +41,7 @@ pub struct Room {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum DetectionStrategy {
+    Simple,
     GraphOnly,
     GraphWithVision,
     YoloOnly,
@@ -51,6 +52,7 @@ enum DetectionStrategy {
 impl DetectionStrategy {
     fn as_str(&self) -> &'static str {
         match self {
+            Self::Simple => "Simple",
             Self::GraphOnly => "GraphOnly",
             Self::GraphWithVision => "GraphWithVision",
             Self::YoloOnly => "YoloOnly",
@@ -61,7 +63,8 @@ impl DetectionStrategy {
 
     fn description(&self) -> &'static str {
         match self {
-            Self::GraphOnly => "Fast geometric detection (<1ms)",
+            Self::Simple => "Divider-based for rectangular rooms (<1ms)",
+            Self::GraphOnly => "Cycle detection for complex shapes (<1ms)",
             Self::GraphWithVision => "Geometric + AI classification (~54s)",
             Self::YoloOnly => "ML-based detection (not available yet)",
             Self::BestAvailable => "Auto-fallback to best available method",
@@ -113,7 +116,7 @@ fn FloorplanDetector() -> impl IntoView {
     let error = RwSignal::new(Option::<String>::None);
     let area_threshold = RwSignal::new(100.0);
     let door_threshold = RwSignal::new(50.0);
-    let strategy = RwSignal::new(DetectionStrategy::GraphOnly);
+    let strategy = RwSignal::new(DetectionStrategy::Simple);
     let method_used = RwSignal::new(Option::<String>::None);
     let execution_time = RwSignal::new(Option::<u64>::None);
 
@@ -253,7 +256,7 @@ fn FloorplanDetector() -> impl IntoView {
                 enable_yolo: Some(current_strategy == DetectionStrategy::YoloOnly),
             };
 
-            match detect_rooms(request).await {
+            match detect_rooms(request, current_strategy).await {
                 Ok(response) => {
                     rooms.set(response.rooms);
                     method_used.set(response.method_used);
@@ -304,17 +307,19 @@ fn FloorplanDetector() -> impl IntoView {
                         on:change=move |ev| {
                             let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlSelectElement>().value();
                             let new_strategy = match val.as_str() {
+                                "Simple" => DetectionStrategy::Simple,
                                 "GraphOnly" => DetectionStrategy::GraphOnly,
                                 "GraphWithVision" => DetectionStrategy::GraphWithVision,
                                 "YoloOnly" => DetectionStrategy::YoloOnly,
                                 "BestAvailable" => DetectionStrategy::BestAvailable,
                                 "Ensemble" => DetectionStrategy::Ensemble,
-                                _ => DetectionStrategy::GraphOnly,
+                                _ => DetectionStrategy::Simple,
                             };
                             strategy.set(new_strategy);
                         }
                     >
-                        <option value="GraphOnly" selected>"Graph Only (Fast)"</option>
+                        <option value="Simple" selected>"Simple (Divider-based)"</option>
+                        <option value="GraphOnly">"Graph (Cycle Detection)"</option>
                         <option value="GraphWithVision">"Graph + Vision (AI)"</option>
                         <option value="YoloOnly">"YOLO Only (Not Ready)"</option>
                         <option value="BestAvailable">"Best Available"</option>
@@ -446,11 +451,18 @@ async fn send_image_request<T: Serialize>(request: T) -> Result<serde_json::Valu
         .map_err(|e| format!("Failed to parse response: {}", e))
 }
 
-async fn detect_rooms(request: DetectRequest) -> Result<DetectResponse, String> {
+async fn detect_rooms(request: DetectRequest, strategy: DetectionStrategy) -> Result<DetectResponse, String> {
     let client = reqwest::Client::new();
 
+    // Use different endpoint based on strategy
+    let endpoint = if strategy == DetectionStrategy::Simple {
+        "http://localhost:3000/detect/simple"
+    } else {
+        "http://localhost:3000/detect/enhanced"
+    };
+
     let response = client
-        .post("http://localhost:3000/detect/enhanced")
+        .post(endpoint)
         .json(&request)
         .send()
         .await

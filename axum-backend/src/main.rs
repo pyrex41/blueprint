@@ -18,7 +18,7 @@ mod detector_orchestrator;
 mod image_vectorizer;
 
 use graph_builder::*;
-use room_detector::*;
+use room_detector::{detect_rooms, detect_rooms_simple};
 
 // Security limits to prevent DoS attacks
 const MAX_LINES: usize = 10_000;
@@ -152,6 +152,71 @@ async fn health_check() -> impl IntoResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+async fn detect_rooms_simple_handler(
+    Json(request): Json<DetectRoomsRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received simple detection request with {} lines", request.lines.len());
+
+    // Validate input size
+    if request.lines.len() > MAX_LINES {
+        warn!(
+            "Request rejected: too many lines ({} > {})",
+            request.lines.len(),
+            MAX_LINES
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: format!(
+                    "Too many lines. Maximum allowed: {}. Received: {}",
+                    MAX_LINES,
+                    request.lines.len()
+                ),
+            }),
+        ));
+    }
+
+    if request.lines.is_empty() {
+        warn!("Empty lines input");
+        return Ok(Json(DetectRoomsResponse {
+            rooms: vec![],
+            total_rooms: 0,
+        }));
+    }
+
+    // Validate points
+    for (idx, line) in request.lines.iter().enumerate() {
+        if !line.start.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid start point in line {}", idx),
+                }),
+            ));
+        }
+        if !line.end.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid end point in line {}", idx),
+                }),
+            ));
+        }
+    }
+
+    // Use simplified divider-based detection
+    let rooms = detect_rooms_simple(&request.lines, request.area_threshold);
+    info!("Detected {} rooms using simple algorithm", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
 }
 
 async fn detect_rooms_handler(
@@ -457,6 +522,7 @@ pub fn create_app() -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
+        .route("/detect/simple", post(detect_rooms_simple_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
         .route("/upload-image", post(upload_image_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
