@@ -31,3 +31,12 @@ Thumbs.db
 
 # Tauri
 /tauri-stretch/target
+
+# Training data and large files
+/data/
+/yolo-training/
+*.zip
+*.pt
+*.pyc
+__pycache__/
+.venv/
