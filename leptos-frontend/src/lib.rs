@@ -63,9 +63,9 @@ impl DetectionStrategy {
 
     fn description(&self) -> &'static str {
         match self {
-            Self::Simple => "Divider-based for rectangular rooms (<1ms)",
-            Self::GraphOnly => "Cycle detection for complex shapes (<1ms)",
-            Self::GraphWithVision => "Geometric + AI classification (~54s)",
+            Self::Simple => "Vertical divider detection - Fast for rectangular layouts with left-right divisions",
+            Self::GraphOnly => "Cycle detection - Handles complex polygons (pentagons, hexagons, L-shapes)",
+            Self::GraphWithVision => "Geometric + AI classification - Best accuracy, slower (~54s)",
             Self::YoloOnly => "ML-based detection (not available yet)",
             Self::BestAvailable => "Auto-fallback to best available method",
             Self::Ensemble => "Run all methods, return best result",
@@ -79,6 +79,10 @@ struct DetectRequest {
     area_threshold: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     door_threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage_threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outer_boundary_ratio: Option<f64>,
     strategy: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     enable_vision: Option<bool>,
@@ -116,6 +120,8 @@ fn FloorplanDetector() -> impl IntoView {
     let error = RwSignal::new(Option::<String>::None);
     let area_threshold = RwSignal::new(100.0);
     let door_threshold = RwSignal::new(50.0);
+    let coverage_threshold = RwSignal::new(0.3); // 30% minimum coverage for dividers
+    let outer_boundary_ratio = RwSignal::new(1.5); // 1.5x area ratio for boundary filtering
     let strategy = RwSignal::new(DetectionStrategy::Simple);
     let method_used = RwSignal::new(Option::<String>::None);
     let execution_time = RwSignal::new(Option::<u64>::None);
@@ -245,12 +251,16 @@ fn FloorplanDetector() -> impl IntoView {
         let current_strategy = strategy.get();
         let current_area_threshold = area_threshold.get();
         let current_door_threshold = door_threshold.get();
+        let current_coverage_threshold = coverage_threshold.get();
+        let current_outer_boundary_ratio = outer_boundary_ratio.get();
 
         spawn_local(async move {
             let request = DetectRequest {
                 lines: current_lines,
                 area_threshold: current_area_threshold,
                 door_threshold: Some(current_door_threshold),
+                coverage_threshold: Some(current_coverage_threshold),
+                outer_boundary_ratio: Some(current_outer_boundary_ratio),
                 strategy: current_strategy.as_str().to_string(),
                 enable_vision: Some(current_strategy == DetectionStrategy::GraphWithVision),
                 enable_yolo: Some(current_strategy == DetectionStrategy::YoloOnly),
@@ -358,6 +368,45 @@ fn FloorplanDetector() -> impl IntoView {
                             }
                         }
                     />
+                    <p style="font-size: 11px; color: #666;">"For cycle detection (gap bridging)"</p>
+                </div>
+
+                <div class="threshold-control">
+                    <label for="coverage-threshold">"Coverage Threshold:"</label>
+                    <input
+                        type="number"
+                        id="coverage-threshold"
+                        step="0.1"
+                        min="0.0"
+                        max="1.0"
+                        prop:value=move || coverage_threshold.get()
+                        on:input=move |ev| {
+                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value();
+                            if let Ok(parsed) = val.parse::<f64>() {
+                                coverage_threshold.set(parsed);
+                            }
+                        }
+                    />
+                    <p style="font-size: 11px; color: #666;">"For simple algorithm (0.3 = 30% height)"</p>
+                </div>
+
+                <div class="threshold-control">
+                    <label for="boundary-ratio">"Boundary Ratio:"</label>
+                    <input
+                        type="number"
+                        id="boundary-ratio"
+                        step="0.1"
+                        min="1.0"
+                        max="3.0"
+                        prop:value=move || outer_boundary_ratio.get()
+                        on:input=move |ev| {
+                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlInputElement>().value();
+                            if let Ok(parsed) = val.parse::<f64>() {
+                                outer_boundary_ratio.set(parsed);
+                            }
+                        }
+                    />
+                    <p style="font-size: 11px; color: #666;">"For cycle detection (1.5 = 150% of 2nd largest)"</p>
                 </div>
 
                 <button
@@ -455,10 +504,10 @@ async fn detect_rooms(request: DetectRequest, strategy: DetectionStrategy) -> Re
     let client = reqwest::Client::new();
 
     // Use different endpoint based on strategy
-    let endpoint = if strategy == DetectionStrategy::Simple {
-        "http://localhost:3000/detect/simple"
-    } else {
-        "http://localhost:3000/detect/enhanced"
+    let endpoint = match strategy {
+        DetectionStrategy::Simple => "http://localhost:3000/detect/simple",
+        DetectionStrategy::GraphOnly => "http://localhost:3000/detect",
+        _ => "http://localhost:3000/detect/enhanced", // GraphWithVision, BestAvailable, Ensemble
     };
 
     let response = client
