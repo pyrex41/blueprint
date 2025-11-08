@@ -511,7 +511,7 @@ async fn upload_image_handler(
 pub fn create_app() -> Router {
     // Configure CORS from environment or use localhost for development
     let allowed_origins = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081".to_string());
 
     let origins: Vec<_> = allowed_origins
         .split(',')
