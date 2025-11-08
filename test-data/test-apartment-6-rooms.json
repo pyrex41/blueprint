@@ -1,0 +1,57 @@
+[
+  {
+    "start": {"x": 0.0, "y": 0.0},
+    "end": {"x": 600.0, "y": 0.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 600.0, "y": 0.0},
+    "end": {"x": 600.0, "y": 400.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 600.0, "y": 400.0},
+    "end": {"x": 0.0, "y": 400.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 0.0, "y": 400.0},
+    "end": {"x": 0.0, "y": 0.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 200.0, "y": 0.0},
+    "end": {"x": 200.0, "y": 180.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 200.0, "y": 220.0},
+    "end": {"x": 200.0, "y": 400.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 400.0, "y": 0.0},
+    "end": {"x": 400.0, "y": 180.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 400.0, "y": 220.0},
+    "end": {"x": 400.0, "y": 400.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 0.0, "y": 200.0},
+    "end": {"x": 180.0, "y": 200.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 220.0, "y": 200.0},
+    "end": {"x": 380.0, "y": 200.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 420.0, "y": 200.0},
+    "end": {"x": 600.0, "y": 200.0},
+    "is_load_bearing": false
+  }
+]

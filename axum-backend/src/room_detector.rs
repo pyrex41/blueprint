@@ -662,4 +662,339 @@ mod tests {
 
         assert_eq!(signature, expected, "Signature should be normalized to start with minimum element");
     }
+
+    // ===== Tests for detect_rooms_simple =====
+
+    #[test]
+    fn test_simple_detection_two_rooms_vertical() {
+        // Test the original test-floorplan.json scenario
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 400.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 200.0, y: 0.0 },
+                end: Point { x: 200.0, y: 140.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 200.0, y: 160.0 },
+                end: Point { x: 200.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 2, "Should detect exactly 2 rooms");
+
+        // Check first room
+        assert_eq!(rooms[0].bounding_box, [0.0, 0.0, 200.0, 300.0]);
+        assert!((rooms[0].area - 60000.0).abs() < 1.0);
+        assert_eq!(rooms[0].name_hint, "Left Room");
+
+        // Check second room
+        assert_eq!(rooms[1].bounding_box, [200.0, 0.0, 400.0, 300.0]);
+        assert!((rooms[1].area - 60000.0).abs() < 1.0);
+        assert_eq!(rooms[1].name_hint, "Right Room");
+    }
+
+    #[test]
+    fn test_simple_detection_three_rooms_vertical() {
+        // Three rooms side by side
+        let lines = vec![
+            // Outer boundary
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 600.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 600.0, y: 0.0 },
+                end: Point { x: 600.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 600.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // First divider at x=200
+            Line {
+                start: Point { x: 200.0, y: 0.0 },
+                end: Point { x: 200.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            // Second divider at x=400
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 3, "Should detect exactly 3 rooms");
+        assert_eq!(rooms[0].name_hint, "Left Room");
+        assert_eq!(rooms[2].name_hint, "Right Room");
+        assert!((rooms[0].area - 60000.0).abs() < 1.0);
+        assert!((rooms[1].area - 60000.0).abs() < 1.0);
+        assert!((rooms[2].area - 60000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_simple_detection_no_dividers() {
+        // Single room, no internal dividers
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 100.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 100.0, y: 0.0 },
+                end: Point { x: 100.0, y: 100.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 100.0, y: 100.0 },
+                end: Point { x: 0.0, y: 100.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 100.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 1, "Should detect exactly 1 room");
+        assert!((rooms[0].area - 10000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_simple_detection_small_area_filter() {
+        // Two rooms but one is too small
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 110.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 110.0, y: 0.0 },
+                end: Point { x: 110.0, y: 100.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 110.0, y: 100.0 },
+                end: Point { x: 0.0, y: 100.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 100.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // Divider creates 10x100 and 100x100 rooms
+            Line {
+                start: Point { x: 10.0, y: 0.0 },
+                end: Point { x: 10.0, y: 100.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 1500.0);
+
+        // Only the 100x100 room should pass the 1500 threshold
+        assert_eq!(rooms.len(), 1, "Should detect 1 room above threshold");
+        assert!((rooms[0].area - 10000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_simple_detection_partial_divider() {
+        // Divider doesn't span full height (should still be detected if >30% coverage)
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 400.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // Divider with 100/300 = 33% coverage (should be detected)
+            Line {
+                start: Point { x: 200.0, y: 100.0 },
+                end: Point { x: 200.0, y: 200.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 2, "Should detect 2 rooms with partial divider");
+    }
+
+    #[test]
+    fn test_simple_detection_very_short_divider() {
+        // Divider with <30% coverage (should NOT be detected as divider)
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 400.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // Divider with 50/300 = 16.7% coverage (should NOT be detected)
+            Line {
+                start: Point { x: 200.0, y: 125.0 },
+                end: Point { x: 200.0, y: 175.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 1, "Should detect 1 room (divider too short)");
+    }
+
+    #[test]
+    fn test_simple_detection_empty_input() {
+        let lines = vec![];
+        let rooms = detect_rooms_simple(&lines, 100.0);
+        assert_eq!(rooms.len(), 0, "Empty input should return no rooms");
+    }
+
+    #[test]
+    fn test_simple_detection_horizontal_walls_ignored() {
+        // Simple algorithm only detects vertical dividers
+        // Horizontal walls should be ignored
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 400.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // Horizontal divider (should be ignored by simple algorithm)
+            Line {
+                start: Point { x: 0.0, y: 150.0 },
+                end: Point { x: 400.0, y: 150.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        // Should detect 1 room since horizontal dividers are ignored
+        assert_eq!(rooms.len(), 1, "Horizontal dividers should be ignored");
+    }
+
+    #[test]
+    fn test_simple_detection_duplicate_dividers() {
+        // Multiple lines at same x should only create one divider
+        let lines = vec![
+            Line {
+                start: Point { x: 0.0, y: 0.0 },
+                end: Point { x: 400.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 0.0 },
+                end: Point { x: 400.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 400.0, y: 300.0 },
+                end: Point { x: 0.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 0.0, y: 300.0 },
+                end: Point { x: 0.0, y: 0.0 },
+                is_load_bearing: false,
+            },
+            // Two segments at x=200 (door gap)
+            Line {
+                start: Point { x: 200.0, y: 0.0 },
+                end: Point { x: 200.0, y: 140.0 },
+                is_load_bearing: false,
+            },
+            Line {
+                start: Point { x: 200.0, y: 160.0 },
+                end: Point { x: 200.0, y: 300.0 },
+                is_load_bearing: false,
+            },
+        ];
+
+        let rooms = detect_rooms_simple(&lines, 100.0);
+
+        assert_eq!(rooms.len(), 2, "Duplicate dividers should be merged");
+    }
 }

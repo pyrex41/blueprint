@@ -1,0 +1,22 @@
+[
+  {
+    "start": {"x": 0.0, "y": 0.0},
+    "end": {"x": 500.0, "y": 0.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 500.0, "y": 0.0},
+    "end": {"x": 500.0, "y": 100.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 500.0, "y": 100.0},
+    "end": {"x": 0.0, "y": 100.0},
+    "is_load_bearing": false
+  },
+  {
+    "start": {"x": 0.0, "y": 100.0},
+    "end": {"x": 0.0, "y": 0.0},
+    "is_load_bearing": false
+  }
+]
