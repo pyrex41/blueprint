@@ -6,10 +6,10 @@ This document describes the comprehensive test suite for the geometric room dete
 
 ## Test Structure
 
-### 1. Unit Tests (28 tests)
+### 1. Unit Tests (29 tests)
 Located in: `axum-backend/src/room_detector.rs`
 
-**Cycle Detection Tests (19 tests):**
+**Cycle Detection Tests (20 tests):**
 - Bounding box calculation
 - Polygon area calculation
 - Simple square detection
@@ -17,7 +17,8 @@ Located in: `axum-backend/src/room_detector.rs`
 - Triangle detection
 - Pentagon detection (5 vertices) ✨ NEW
 - Hexagon detection (6 vertices) ✨ NEW
-- Outer boundary filtering ✨ NEW
+- Outer boundary filtering (1 interior room) ✨ NEW
+- Multiple interior rooms (3 rooms) ✨ NEW
 - Empty graph handling
 - Single line handling
 - Cycle deduplication
@@ -180,7 +181,7 @@ cd axum-backend
 cargo test
 ```
 
-Expected output: `28 passed`
+Expected output: `29 passed`
 
 ### Integration Tests
 ```bash
@@ -202,8 +203,9 @@ Expected output:
 ### Cycle Detection Enhancements:
 1. ✅ **Support N-sided cycles** - Now accepts 3+ vertex polygons
 2. ✅ **Outer boundary filtering** - Automatically filters largest cycle
-3. ✅ **Complex polygon detection** - Pentagons, hexagons, L-shapes
-4. ✅ **Area-based filtering** - Removes tiny door gap artifacts
+3. ✅ **Multiple interior rooms** - Returns ALL inner rooms, not just one
+4. ✅ **Complex polygon detection** - Pentagons, hexagons, L-shapes
+5. ✅ **Area-based filtering** - Removes tiny door gap artifacts
 
 ### Future Improvements
 

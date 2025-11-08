@@ -1112,4 +1112,54 @@ mod tests {
             assert!((room.area - 2500.0).abs() < 100.0, "Should be the smaller inner room");
         }
     }
+
+    #[test]
+    fn test_cycle_detection_multiple_interior_rooms() {
+        // Outer boundary + THREE inner rooms
+        // This validates the algorithm returns ALL interior rooms, not just one
+        let lines = vec![
+            // Outer boundary (400x400 = 160,000 area)
+            Line { start: Point { x: 0.0, y: 0.0 }, end: Point { x: 400.0, y: 0.0 }, is_load_bearing: false },
+            Line { start: Point { x: 400.0, y: 0.0 }, end: Point { x: 400.0, y: 400.0 }, is_load_bearing: false },
+            Line { start: Point { x: 400.0, y: 400.0 }, end: Point { x: 0.0, y: 400.0 }, is_load_bearing: false },
+            Line { start: Point { x: 0.0, y: 400.0 }, end: Point { x: 0.0, y: 0.0 }, is_load_bearing: false },
+
+            // Inner room 1 (50x50 = 2,500 area)
+            Line { start: Point { x: 50.0, y: 50.0 }, end: Point { x: 100.0, y: 50.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 50.0 }, end: Point { x: 100.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 100.0, y: 100.0 }, end: Point { x: 50.0, y: 100.0 }, is_load_bearing: false },
+            Line { start: Point { x: 50.0, y: 100.0 }, end: Point { x: 50.0, y: 50.0 }, is_load_bearing: false },
+
+            // Inner room 2 (60x60 = 3,600 area)
+            Line { start: Point { x: 150.0, y: 150.0 }, end: Point { x: 210.0, y: 150.0 }, is_load_bearing: false },
+            Line { start: Point { x: 210.0, y: 150.0 }, end: Point { x: 210.0, y: 210.0 }, is_load_bearing: false },
+            Line { start: Point { x: 210.0, y: 210.0 }, end: Point { x: 150.0, y: 210.0 }, is_load_bearing: false },
+            Line { start: Point { x: 150.0, y: 210.0 }, end: Point { x: 150.0, y: 150.0 }, is_load_bearing: false },
+
+            // Inner room 3 (70x70 = 4,900 area)
+            Line { start: Point { x: 250.0, y: 250.0 }, end: Point { x: 320.0, y: 250.0 }, is_load_bearing: false },
+            Line { start: Point { x: 320.0, y: 250.0 }, end: Point { x: 320.0, y: 320.0 }, is_load_bearing: false },
+            Line { start: Point { x: 320.0, y: 320.0 }, end: Point { x: 250.0, y: 320.0 }, is_load_bearing: false },
+            Line { start: Point { x: 250.0, y: 320.0 }, end: Point { x: 250.0, y: 250.0 }, is_load_bearing: false },
+        ];
+
+        let graph = build_graph(&lines);
+        let rooms = detect_rooms(&graph, 100.0);
+
+        // Should filter out outer boundary (160,000), return ALL 3 interior rooms
+        // Outer boundary is 160,000 > 4,900 * 1.5 = 7,350 ✓ (gets filtered)
+        assert_eq!(rooms.len(), 3, "Should detect all 3 interior rooms, outer boundary filtered");
+
+        // Verify all rooms have reasonable areas (all < 5,000)
+        for room in &rooms {
+            assert!(room.area < 5000.0, "All returned rooms should be interior rooms, not outer boundary");
+            assert!(room.area > 2000.0, "All rooms should be above area threshold");
+        }
+
+        // Check that areas match our expected rooms
+        let areas: Vec<f64> = rooms.iter().map(|r| r.area).collect();
+        assert!(areas.iter().any(|&a| (a - 2500.0).abs() < 100.0), "Should include 50x50 room");
+        assert!(areas.iter().any(|&a| (a - 3600.0).abs() < 100.0), "Should include 60x60 room");
+        assert!(areas.iter().any(|&a| (a - 4900.0).abs() < 100.0), "Should include 70x70 room");
+    }
 }
