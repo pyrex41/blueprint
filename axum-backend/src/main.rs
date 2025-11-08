@@ -119,6 +119,10 @@ struct DetectRoomsRequest {
     area_threshold: f64,
     #[serde(default = "default_door_threshold")]
     door_threshold: f64,
+    #[serde(default = "default_coverage_threshold")]
+    coverage_threshold: f64,
+    #[serde(default = "default_outer_boundary_ratio")]
+    outer_boundary_ratio: f64,
 }
 
 fn default_area_threshold() -> f64 {
@@ -127,6 +131,14 @@ fn default_area_threshold() -> f64 {
 
 fn default_door_threshold() -> f64 {
     50.0  // Default door gap: 50 units
+}
+
+fn default_coverage_threshold() -> f64 {
+    0.3  // 30% minimum height coverage for vertical dividers
+}
+
+fn default_outer_boundary_ratio() -> f64 {
+    1.5  // Outer boundary must be 1.5x larger than second-largest room
 }
 
 #[derive(Debug, Serialize)]
@@ -210,7 +222,7 @@ async fn detect_rooms_simple_handler(
     }
 
     // Use simplified divider-based detection
-    let rooms = detect_rooms_simple(&request.lines, request.area_threshold);
+    let rooms = detect_rooms_simple(&request.lines, request.area_threshold, request.coverage_threshold);
     info!("Detected {} rooms using simple algorithm", rooms.len());
 
     Ok(Json(DetectRoomsResponse {
@@ -295,7 +307,7 @@ async fn detect_rooms_handler(
     info!("Built graph with {} nodes and {} edges", graph.node_count(), graph.edge_count());
 
     // Detect rooms (cycles)
-    let rooms = detect_rooms(&graph, request.area_threshold);
+    let rooms = detect_rooms(&graph, request.area_threshold, request.outer_boundary_ratio);
     info!("Detected {} rooms", rooms.len());
 
     Ok(Json(DetectRoomsResponse {
@@ -483,7 +495,7 @@ async fn upload_image_handler(
     let graph = build_graph_with_door_threshold(&lines, door_threshold);
 
     // Detect rooms
-    let rooms = detect_rooms(&graph, payload.area_threshold);
+    let rooms = detect_rooms(&graph, payload.area_threshold, 1.5); // Default outer boundary ratio
     info!("Detected {} rooms", rooms.len());
 
     Ok(Json(serde_json::json!({

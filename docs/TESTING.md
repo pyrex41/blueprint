@@ -4,6 +4,72 @@
 
 This document describes the comprehensive test suite for the geometric room detection system, covering both simplified divider-based detection and cycle detection algorithms.
 
+## Algorithm Selection Guide
+
+### When to Use Simple Algorithm (`/detect/simple`)
+
+**Best for:**
+- ✅ Rectangular floorplans with clear vertical divisions
+- ✅ Office layouts with rooms arranged horizontally
+- ✅ Scenarios with door gaps in dividing walls
+- ✅ Fast processing requirements
+
+**Characteristics:**
+- Detects vertical dividers (walls with constant x-coordinate)
+- Requires >30% height coverage for divider recognition
+- Automatically merges wall segments with gaps (doors)
+- Creates rectangular bounding boxes between dividers
+- **Limitation:** Only detects vertical divisions (horizontal dividers ignored)
+
+**Use when:** Your floorplan has rooms arranged left-to-right with vertical walls separating them.
+
+### When to Use Cycle Detection (`/detect`)
+
+**Best for:**
+- ✅ Complex polygonal rooms (pentagons, hexagons, L-shapes)
+- ✅ Non-rectangular layouts
+- ✅ Floorplans with irregular room shapes
+- ✅ Nested room configurations
+
+**Characteristics:**
+- Detects closed cycles of any polygon (3+ vertices)
+- Automatically filters outer boundary using 1.5× area ratio
+- Returns all interior rooms when multiple exist
+- Handles complex geometry through graph-based DFS
+- **Limitation:** Requires complete wall cycles (gaps may break detection)
+
+**Use when:** Your floorplan has irregular room shapes or complex geometry.
+
+### Decision Matrix
+
+| Floorplan Type | Recommended Algorithm | Reason |
+|----------------|----------------------|--------|
+| Office with vertical divisions | Simple | Fast, handles door gaps naturally |
+| Apartment with irregular rooms | Cycle Detection | Handles complex polygons |
+| Grid layout (2×2, 3×3) | Simple | Efficient for regular rectangles |
+| L-shaped or pentagonal rooms | Cycle Detection | Required for non-rectangular shapes |
+| Mixed rectangular + irregular | Both (compare results) | Use ensemble approach |
+
+### Configuration Parameters
+
+Both algorithms support configurable thresholds:
+
+**`area_threshold`** (default: 100.0)
+- Minimum area for valid room detection
+- Filters out tiny artifacts from wall intersections
+- Increase for large buildings, decrease for small floorplans
+
+**Cycle Detection Only:**
+- `coverage_threshold` (default: 0.3 / 30%)
+  - Minimum height coverage for vertical divider recognition
+  - Lower values detect shorter partial walls
+  - Higher values require more complete dividers
+
+- `outer_boundary_ratio` (default: 1.5)
+  - Area ratio threshold for filtering outer boundaries
+  - Outer boundary filtered if > ratio × second-largest room
+  - Increase if large interior rooms are incorrectly filtered
+
 ## Test Structure
 
 ### 1. Unit Tests (29 tests)
@@ -173,6 +239,99 @@ Tests API endpoints with various JSON floorplan configurations.
 - Door gaps break cycle completeness
 - **Current implementation only finds outer boundary + door gap region**
 
+## API Reference
+
+### POST /detect/simple
+
+Simplified room detection using vertical dividers.
+
+**Request Body:**
+```json
+{
+  "lines": [{"start": {"x": 0, "y": 0}, "end": {"x": 100, "y": 0}, "is_load_bearing": false}],
+  "area_threshold": 100.0,          // Optional, default: 100.0
+  "coverage_threshold": 0.3,         // Optional, default: 0.3 (30%)
+  "door_threshold": 50.0,            // Optional, default: 50.0
+  "outer_boundary_ratio": 1.5        // Optional, default: 1.5 (not used by simple)
+}
+```
+
+**Parameters:**
+- `lines` (required): Array of wall line segments
+- `area_threshold` (optional): Minimum room area to detect (filters small artifacts)
+- `coverage_threshold` (optional): Minimum height coverage (0.0-1.0) for vertical divider detection
+  - Default: 0.3 (divider must span ≥30% of total height)
+  - Lower values (e.g., 0.2) detect shorter partial walls
+  - Higher values (e.g., 0.5) require more complete dividers
+- `door_threshold`: Maximum gap size for door detection (not used by simple algorithm)
+- `outer_boundary_ratio`: Not used by simple algorithm
+
+### POST /detect
+
+Cycle-based detection for complex polygonal rooms.
+
+**Request Body:**
+```json
+{
+  "lines": [{"start": {"x": 0, "y": 0}, "end": {"x": 100, "y": 0}, "is_load_bearing": false}],
+  "area_threshold": 100.0,          // Optional, default: 100.0
+  "coverage_threshold": 0.3,         // Optional, default: 0.3 (not used by cycle)
+  "door_threshold": 50.0,            // Optional, default: 50.0
+  "outer_boundary_ratio": 1.5        // Optional, default: 1.5
+}
+```
+
+**Parameters:**
+- `lines` (required): Array of wall line segments
+- `area_threshold` (optional): Minimum room area to detect
+- `coverage_threshold`: Not used by cycle detection
+- `door_threshold` (optional): Maximum gap size to bridge with virtual doors
+- `outer_boundary_ratio` (optional): Area ratio threshold for outer boundary filtering
+  - Default: 1.5 (outer boundary filtered if >1.5× larger than second-largest)
+  - Higher values (e.g., 2.0) are more conservative (keeps more cycles)
+  - Lower values (e.g., 1.2) are more aggressive (filters more aggressively)
+
+**Response (both endpoints):**
+```json
+{
+  "total_rooms": 2,
+  "rooms": [
+    {
+      "id": 0,
+      "bounding_box": [0.0, 0.0, 200.0, 300.0],
+      "area": 60000.0,
+      "name_hint": "Left Room",
+      "points": [[0.0, 0.0], [200.0, 0.0], ...]
+    }
+  ]
+}
+```
+
+### Example Usage
+
+**Simple algorithm with custom thresholds:**
+```bash
+curl -X POST http://localhost:3000/detect/simple \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lines": [...],
+    "area_threshold": 500.0,
+    "coverage_threshold": 0.2
+  }'
+```
+
+**Cycle detection with custom boundary ratio:**
+```bash
+curl -X POST http://localhost:3000/detect \
+  -H "Content-Type: application/json" \
+  -d '{
+    "lines": [...],
+    "area_threshold": 100.0,
+    "door_threshold": 50.0,
+    "outer_boundary_ratio": 2.0
+  }'
+```
+
 ## Running Tests
 
 ### Unit Tests
@@ -206,6 +365,7 @@ Expected output:
 3. ✅ **Multiple interior rooms** - Returns ALL inner rooms, not just one
 4. ✅ **Complex polygon detection** - Pentagons, hexagons, L-shapes
 5. ✅ **Area-based filtering** - Removes tiny door gap artifacts
+6. ✅ **Configurable thresholds** - API parameters for coverage_threshold and outer_boundary_ratio
 
 ### Future Improvements
 

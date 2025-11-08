@@ -11,8 +11,8 @@ const MAX_CYCLES: usize = 1000;
 const MAX_CYCLE_LENGTH: usize = 100;
 
 /// Detect rooms in a floorplan graph by finding cycles
-pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64) -> Vec<Room> {
-    let cycles = find_room_cycles(graph);
+pub fn detect_rooms(graph: &FloorplanGraph, area_threshold: f64, outer_boundary_ratio: f64) -> Vec<Room> {
+    let cycles = find_room_cycles(graph, outer_boundary_ratio);
     let mut rooms = Vec::new();
 
     for (id, cycle_nodes) in cycles.iter().enumerate() {
@@ -74,11 +74,11 @@ pub fn find_all_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
 }
 
 /// Find cycles that could represent room boundaries (filtered version)
-fn find_room_cycles(graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
+fn find_room_cycles(graph: &FloorplanGraph, outer_boundary_ratio: f64) -> Vec<Vec<NodeIndex>> {
     let all_cycles = find_all_cycles(graph);
 
-    // Filter to only include cycles that are large enough to be rooms (exactly 4 sides)
-    filter_room_cycles(all_cycles, graph)
+    // Filter to only include cycles that are large enough to be rooms (3+ sides)
+    filter_room_cycles(all_cycles, graph, outer_boundary_ratio)
 }
 
 /// Find all cycles starting from a given node using DFS
@@ -201,7 +201,7 @@ fn is_valid_cycle(cycle: &[NodeIndex], graph: &FloorplanGraph) -> bool {
 /// - Must have at least 3 sides (minimum polygon)
 /// - Must be valid (all edges exist)
 /// - Filters out the outer boundary (largest area cycle)
-fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph) -> Vec<Vec<NodeIndex>> {
+fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph, outer_boundary_ratio: f64) -> Vec<Vec<NodeIndex>> {
     let mut valid_cycles: Vec<Vec<NodeIndex>> = Vec::new();
 
     for cycle in cycles {
@@ -255,9 +255,8 @@ fn filter_room_cycles(cycles: Vec<Vec<NodeIndex>>, graph: &FloorplanGraph) -> Ve
 
     // Remove the largest cycle (outer boundary) if it's significantly larger
     // Keep it if there are multiple cycles with similar area (indicates no clear outer boundary)
-    let area_ratio_threshold = 1.5; // Outer boundary should be at least 50% larger
 
-    if cycle_areas.len() >= 2 && largest_area > cycle_areas[1].1 * area_ratio_threshold {
+    if cycle_areas.len() >= 2 && largest_area > cycle_areas[1].1 * outer_boundary_ratio {
         // Remove the largest (outer boundary)
         cycle_areas.remove(0);
     }
@@ -389,7 +388,7 @@ fn generate_room_name(area: f64, bbox: &[f64; 4]) -> String {
 
 /// Simplified room detection for rectangular floorplans with vertical dividers
 /// This algorithm works well for simple cases like test-floorplan.json
-pub fn detect_rooms_simple(lines: &[crate::Line], area_threshold: f64) -> Vec<Room> {
+pub fn detect_rooms_simple(lines: &[crate::Line], area_threshold: f64, coverage_threshold: f64) -> Vec<Room> {
     if lines.is_empty() {
         return vec![];
     }
@@ -422,7 +421,7 @@ pub fn detect_rooms_simple(lines: &[crate::Line], area_threshold: f64) -> Vec<Ro
                 let line_max_y = line.start.y.max(line.end.y);
                 let coverage = (line_max_y - line_min_y) / (max_y - min_y);
 
-                if coverage > 0.3 {  // At least 30% coverage
+                if coverage > coverage_threshold {
                     if !dividers.iter().any(|&d| (d - x).abs() < EPSILON) {
                         dividers.push(x);
                     }
@@ -538,7 +537,7 @@ mod tests {
         ];
 
         let graph = build_graph(&lines);
-        let rooms = detect_rooms(&graph, 100.0);
+        let rooms = detect_rooms(&graph, 100.0, 1.5);
 
         assert!(rooms.len() > 0, "Should detect at least one room");
 
@@ -746,7 +745,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 2, "Should detect exactly 2 rooms");
 
@@ -800,7 +799,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 3, "Should detect exactly 3 rooms");
         assert_eq!(rooms[0].name_hint, "Left Room");
@@ -836,7 +835,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 1, "Should detect exactly 1 room");
         assert!((rooms[0].area - 10000.0).abs() < 1.0);
@@ -874,7 +873,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 1500.0);
+        let rooms = detect_rooms_simple(&lines, 1500.0, 0.3);
 
         // Only the 100x100 room should pass the 1500 threshold
         assert_eq!(rooms.len(), 1, "Should detect 1 room above threshold");
@@ -913,7 +912,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 2, "Should detect 2 rooms with partial divider");
     }
@@ -950,7 +949,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 1, "Should detect 1 room (divider too short)");
     }
@@ -958,7 +957,7 @@ mod tests {
     #[test]
     fn test_simple_detection_empty_input() {
         let lines = vec![];
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
         assert_eq!(rooms.len(), 0, "Empty input should return no rooms");
     }
 
@@ -995,7 +994,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         // Should detect 1 room since horizontal dividers are ignored
         assert_eq!(rooms.len(), 1, "Horizontal dividers should be ignored");
@@ -1038,7 +1037,7 @@ mod tests {
             },
         ];
 
-        let rooms = detect_rooms_simple(&lines, 100.0);
+        let rooms = detect_rooms_simple(&lines, 100.0, 0.3);
 
         assert_eq!(rooms.len(), 2, "Duplicate dividers should be merged");
     }
@@ -1057,7 +1056,7 @@ mod tests {
         ];
 
         let graph = build_graph(&lines);
-        let rooms = detect_rooms(&graph, 10.0);
+        let rooms = detect_rooms(&graph, 10.0, 1.5);
 
         assert!(rooms.len() > 0, "Should detect pentagon room");
         if let Some(room) = rooms.first() {
@@ -1078,7 +1077,7 @@ mod tests {
         ];
 
         let graph = build_graph(&lines);
-        let rooms = detect_rooms(&graph, 10.0);
+        let rooms = detect_rooms(&graph, 10.0, 1.5);
 
         assert!(rooms.len() > 0, "Should detect hexagon room");
         if let Some(room) = rooms.first() {
@@ -1103,7 +1102,7 @@ mod tests {
         ];
 
         let graph = build_graph(&lines);
-        let rooms = detect_rooms(&graph, 100.0);
+        let rooms = detect_rooms(&graph, 100.0, 1.5);
 
         // Should filter out outer boundary, keep only inner room
         assert_eq!(rooms.len(), 1, "Should detect only inner room, outer boundary filtered");
@@ -1144,7 +1143,7 @@ mod tests {
         ];
 
         let graph = build_graph(&lines);
-        let rooms = detect_rooms(&graph, 100.0);
+        let rooms = detect_rooms(&graph, 100.0, 1.5);
 
         // Should filter out outer boundary (160,000), return ALL 3 interior rooms
         // Outer boundary is 160,000 > 4,900 * 1.5 = 7,350 ✓ (gets filtered)
