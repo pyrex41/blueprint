@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find . -type d ( -name tests -o -name benches ))",
+      "Bash(gh pr view:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

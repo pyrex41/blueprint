@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::Engine;
 use nalgebra::Point2;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use tracing::{info, warn};
 
 mod graph_builder;
 mod room_detector;
+mod detector_orchestrator;
 
 use graph_builder::*;
 use room_detector::*;
@@ -114,10 +116,16 @@ struct DetectRoomsRequest {
     lines: Vec<Line>,
     #[serde(default = "default_area_threshold")]
     area_threshold: f64,
+    #[serde(default = "default_door_threshold")]
+    door_threshold: f64,
 }
 
 fn default_area_threshold() -> f64 {
     100.0
+}
+
+fn default_door_threshold() -> f64 {
+    50.0  // Default door gap: 50 units
 }
 
 #[derive(Debug, Serialize)]
@@ -211,9 +219,14 @@ async fn detect_rooms_handler(
         }
     }
 
-    // Build graph from lines
-    let graph = build_graph(&request.lines);
-    info!("Built graph with {} nodes", graph.node_count());
+    // Build graph from lines with door gap detection
+    let graph = if request.door_threshold > 0.0 {
+        info!("Building graph with door threshold: {}", request.door_threshold);
+        graph_builder::build_graph_with_door_threshold(&request.lines, request.door_threshold)
+    } else {
+        build_graph(&request.lines)
+    };
+    info!("Built graph with {} nodes and {} edges", graph.node_count(), graph.edge_count());
 
     // Detect rooms (cycles)
     let rooms = detect_rooms(&graph, request.area_threshold);
@@ -223,6 +236,123 @@ async fn detect_rooms_handler(
         total_rooms: rooms.len(),
         rooms,
     }))
+}
+
+/// Enhanced detection request with orchestrator support
+#[derive(Debug, Deserialize)]
+struct EnhancedDetectRequest {
+    lines: Vec<Line>,
+    #[serde(default)]
+    image_base64: Option<String>,
+    #[serde(default = "default_area_threshold")]
+    area_threshold: f64,
+    #[serde(default = "default_door_threshold")]
+    door_threshold: f64,
+    #[serde(default)]
+    strategy: Option<detector_orchestrator::CombinationStrategy>,
+    #[serde(default)]
+    enable_vision: Option<bool>,
+    #[serde(default)]
+    enable_yolo: Option<bool>,
+}
+
+/// Enhanced detection handler using the orchestrator
+async fn enhanced_detect_handler(
+    Json(request): Json<EnhancedDetectRequest>,
+) -> Result<Json<detector_orchestrator::DetectionResult>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received enhanced detection request with {} lines", request.lines.len());
+
+    // Validate input (same as regular detect)
+    if request.lines.len() > MAX_LINES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: format!("Too many lines. Max: {}", MAX_LINES),
+            }),
+        ));
+    }
+
+    // Validate points
+    for (idx, line) in request.lines.iter().enumerate() {
+        if !line.start.is_valid() || !line.end.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid point in line {}", idx),
+                }),
+            ));
+        }
+    }
+
+    // Decode image if provided
+    let image_bytes = if let Some(ref b64) = request.image_base64 {
+        match base64::engine::general_purpose::STANDARD.decode(b64) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "INVALID_IMAGE".to_string(),
+                        message: format!("Failed to decode base64 image: {}", e),
+                    }),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build orchestrator config
+    let mut config = detector_orchestrator::DetectorConfig {
+        area_threshold: request.area_threshold,
+        door_threshold: request.door_threshold,
+        enable_vision: request.enable_vision.unwrap_or(false),
+        enable_yolo: request.enable_yolo.unwrap_or(false),
+        strategy: request
+            .strategy
+            .unwrap_or(detector_orchestrator::CombinationStrategy::GraphOnly),
+    };
+
+    // Auto-enable vision if API key is set and strategy requires it
+    if matches!(
+        config.strategy,
+        detector_orchestrator::CombinationStrategy::GraphWithVision
+            | detector_orchestrator::CombinationStrategy::BestAvailable
+            | detector_orchestrator::CombinationStrategy::Ensemble
+    ) && std::env::var("OPENAI_API_KEY").is_ok()
+    {
+        config.enable_vision = true;
+    }
+
+    // Create orchestrator and run detection
+    let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
+
+    match orchestrator
+        .detect_rooms(&request.lines, image_bytes.as_deref())
+        .await
+    {
+        Ok(result) => {
+            info!(
+                "Enhanced detection completed: {} rooms, method: {}, time: {}ms",
+                result.rooms.len(),
+                result.method_used,
+                result.execution_time_ms
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            warn!("Enhanced detection failed: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "DETECTION_FAILED".to_string(),
+                    message: format!("Detection failed: {}", e),
+                }),
+            ))
+        }
+    }
 }
 
 /// Create the Axum app with all routes and middleware
@@ -253,7 +383,8 @@ pub fn create_app() -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
-        .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB max request size
+        .route("/detect/enhanced", post(enhanced_detect_handler))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
         .layer(cors)
 }
 

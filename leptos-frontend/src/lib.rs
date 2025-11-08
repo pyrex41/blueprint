@@ -29,18 +29,69 @@ pub struct Room {
     pub area: f64,
     pub name_hint: String,
     pub points: Vec<Point>,
+    #[serde(default)]
+    pub room_type: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub detection_method: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+enum DetectionStrategy {
+    GraphOnly,
+    GraphWithVision,
+    YoloOnly,
+    BestAvailable,
+    Ensemble,
+}
+
+impl DetectionStrategy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::GraphOnly => "GraphOnly",
+            Self::GraphWithVision => "GraphWithVision",
+            Self::YoloOnly => "YoloOnly",
+            Self::BestAvailable => "BestAvailable",
+            Self::Ensemble => "Ensemble",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Self::GraphOnly => "Fast geometric detection (<1ms)",
+            Self::GraphWithVision => "Geometric + AI classification (~54s)",
+            Self::YoloOnly => "ML-based detection (not available yet)",
+            Self::BestAvailable => "Auto-fallback to best available method",
+            Self::Ensemble => "Run all methods, return best result",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct DetectRequest {
     lines: Vec<Line>,
     area_threshold: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    door_threshold: Option<f64>,
+    strategy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_vision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_yolo: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DetectResponse {
     rooms: Vec<Room>,
-    total_rooms: usize,
+    #[serde(default)]
+    method_used: Option<String>,
+    #[serde(default)]
+    execution_time_ms: Option<u64>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 #[component]
@@ -61,6 +112,10 @@ fn FloorplanDetector() -> impl IntoView {
     let (loading, set_loading) = create_signal(false);
     let (error, set_error) = create_signal(Option::<String>::None);
     let (area_threshold, set_area_threshold) = create_signal(100.0);
+    let (door_threshold, set_door_threshold) = create_signal(50.0);
+    let (strategy, set_strategy) = create_signal(DetectionStrategy::GraphOnly);
+    let (method_used, set_method_used) = create_signal(Option::<String>::None);
+    let (execution_time, set_execution_time) = create_signal(Option::<u64>::None);
 
     let file_input_ref = create_node_ref::<html::Input>();
     let canvas_ref = create_node_ref::<html::Canvas>();
@@ -108,16 +163,26 @@ fn FloorplanDetector() -> impl IntoView {
 
         set_loading.set(true);
         set_error.set(None);
+        set_method_used.set(None);
+        set_execution_time.set(None);
+
+        let current_strategy = strategy.get();
 
         spawn_local(async move {
             let request = DetectRequest {
                 lines: current_lines,
                 area_threshold: area_threshold.get(),
+                door_threshold: Some(door_threshold.get()),
+                strategy: current_strategy.as_str().to_string(),
+                enable_vision: Some(current_strategy == DetectionStrategy::GraphWithVision),
+                enable_yolo: Some(current_strategy == DetectionStrategy::YoloOnly),
             };
 
             match detect_rooms(request).await {
                 Ok(response) => {
                     set_rooms.set(response.rooms);
+                    set_method_used.set(response.method_used);
+                    set_execution_time.set(response.execution_time_ms);
                     set_loading.set(false);
                 }
                 Err(e) => {
@@ -158,6 +223,34 @@ fn FloorplanDetector() -> impl IntoView {
                 </div>
 
                 <div class="threshold-control">
+                    <label for="strategy">"Detection Strategy:"</label>
+                    <select
+                        id="strategy"
+                        on:change=move |ev| {
+                            let val = event_target_value(&ev);
+                            let new_strategy = match val.as_str() {
+                                "GraphOnly" => DetectionStrategy::GraphOnly,
+                                "GraphWithVision" => DetectionStrategy::GraphWithVision,
+                                "YoloOnly" => DetectionStrategy::YoloOnly,
+                                "BestAvailable" => DetectionStrategy::BestAvailable,
+                                "Ensemble" => DetectionStrategy::Ensemble,
+                                _ => DetectionStrategy::GraphOnly,
+                            };
+                            set_strategy.set(new_strategy);
+                        }
+                    >
+                        <option value="GraphOnly" selected>"Graph Only (Fast)"</option>
+                        <option value="GraphWithVision">"Graph + Vision (AI)"</option>
+                        <option value="YoloOnly">"YOLO Only (Not Ready)"</option>
+                        <option value="BestAvailable">"Best Available"</option>
+                        <option value="Ensemble">"Ensemble (All Methods)"</option>
+                    </select>
+                    <p style="font-size: 12px; color: #666; margin-top: 4px;">
+                        {move || strategy.get().description()}
+                    </p>
+                </div>
+
+                <div class="threshold-control">
                     <label for="threshold">"Area Threshold:"</label>
                     <input
                         type="number"
@@ -166,6 +259,20 @@ fn FloorplanDetector() -> impl IntoView {
                         on:input=move |ev| {
                             if let Ok(val) = event_target_value(&ev).parse::<f64>() {
                                 set_area_threshold.set(val);
+                            }
+                        }
+                    />
+                </div>
+
+                <div class="threshold-control">
+                    <label for="door-threshold">"Door Threshold:"</label>
+                    <input
+                        type="number"
+                        id="door-threshold"
+                        value=move || door_threshold.get()
+                        on:input=move |ev| {
+                            if let Ok(val) = event_target_value(&ev).parse::<f64>() {
+                                set_door_threshold.set(val);
                             }
                         }
                     />
@@ -189,6 +296,12 @@ fn FloorplanDetector() -> impl IntoView {
             <div class="stats">
                 <p>"Lines: " {move || lines.get().len()}</p>
                 <p>"Rooms Detected: " {move || rooms.get().len()}</p>
+                {move || method_used.get().map(|method| view! {
+                    <p>"Method: " {method}</p>
+                })}
+                {move || execution_time.get().map(|time| view! {
+                    <p>"Time: " {format!("{}ms", time)}</p>
+                })}
             </div>
 
             <div class="canvas-container">
@@ -208,7 +321,8 @@ fn FloorplanDetector() -> impl IntoView {
                     children=move |room: Room| {
                         view! {
                             <div class="room-card">
-                                <h3>{format!("Room {}: {}", room.id, room.name_hint)}</h3>
+                                <h3>{format!("Room {}: {}", room.id,
+                                    room.room_type.as_ref().unwrap_or(&room.name_hint))}</h3>
                                 <p>"Area: " {format!("{:.2}", room.area)}</p>
                                 <p>"Bounding Box: [{:.1}, {:.1}, {:.1}, {:.1}]"
                                     room.bounding_box[0]
@@ -216,6 +330,15 @@ fn FloorplanDetector() -> impl IntoView {
                                     room.bounding_box[2]
                                     room.bounding_box[3]
                                 </p>
+                                {room.confidence.map(|conf| view! {
+                                    <p>"Confidence: " {format!("{:.0}%", conf * 100.0)}</p>
+                                })}
+                                {(!room.features.is_empty()).then(|| view! {
+                                    <p>"Features: " {room.features.join(", ")}</p>
+                                })}
+                                {room.detection_method.as_ref().map(|method| view! {
+                                    <p style="font-size: 12px; color: #888;">"Detected by: " {method}</p>
+                                })}
                             </div>
                         }
                     }
@@ -229,14 +352,16 @@ async fn detect_rooms(request: DetectRequest) -> Result<DetectResponse, String> 
     let client = reqwest::Client::new();
 
     let response = client
-        .post("http://localhost:3000/detect")
+        .post("http://localhost:3000/detect/enhanced")
         .json(&request)
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("Server error: {}", response.status()));
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Server error ({}): {}", status, error_text));
     }
 
     response

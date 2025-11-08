@@ -1,0 +1,27 @@
+[package]
+name = "unified-detector"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
+[[bin]]
+name = "ensemble"
+path = "src/bin/ensemble.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+image.workspace = true
+anyhow.workspace = true
+vision-classifier = { path = "../vision-classifier" }
+chrono.workspace = true
+
+# For timing
+instant = "0.1"
