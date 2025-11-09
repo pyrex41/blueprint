@@ -193,15 +193,23 @@ impl VisionClassifier {
 
         info!("Sending request to OpenAI API (model: {})", self.model);
 
-        // Call OpenAI API
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        // Call OpenAI API with 60-second timeout
+        let api_call = async {
+            self.client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await
+        };
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            api_call
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -340,15 +348,23 @@ Guidelines:
 
         info!("Sending wall extraction request to OpenAI API (model: {})", self.model);
 
-        // Call OpenAI API
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        // Call OpenAI API with 60-second timeout
+        let api_call = async {
+            self.client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await
+        };
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            api_call
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
 
         if !response.status().is_success() {
             let status = response.status();
