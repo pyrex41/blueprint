@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-/// Vision-based room classifier using OpenAI GPT-5 Vision API
+/// Vision-based room classifier using OpenAI Vision API (GPT-4o)
 pub struct VisionClassifier {
     client: Client,
     api_key: String,
@@ -17,6 +17,36 @@ pub struct RoomClassification {
     pub confidence: f64,             // 0.0-1.0
     pub features: Vec<String>,       // furniture, fixtures identified
     pub description: String,         // detailed description
+}
+
+/// Wall segment extracted from vision analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallSegment {
+    pub start: WallPoint,
+    pub end: WallPoint,
+}
+
+/// Point in normalized coordinate space (0-1000)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WallPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Room label with type hint from vision analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomLabel {
+    pub label: String,
+    pub center: WallPoint,
+    pub room_type: String,
+}
+
+/// Complete wall extraction result from GPT-5 vision
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionWallData {
+    pub walls: Vec<WallSegment>,
+    pub rooms: Vec<RoomLabel>,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,12 +96,12 @@ impl VisionClassifier {
     ///
     /// # Arguments
     /// * `api_key` - OpenAI API key (from OPENAI_API_KEY environment variable)
-    /// * `model` - Model to use (default: "gpt-5")
+    /// * `model` - Model to use (default: "gpt-4o")
     pub fn new(api_key: String, model: Option<String>) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            model: model.unwrap_or_else(|| "gpt-5".to_string()),
+            model: model.unwrap_or_else(|| "gpt-4o".to_string()),
         }
     }
 
@@ -163,15 +193,23 @@ impl VisionClassifier {
 
         info!("Sending request to OpenAI API (model: {})", self.model);
 
-        // Call OpenAI API
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        // Call OpenAI API with 60-second timeout
+        let api_call = async {
+            self.client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await
+        };
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            api_call
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -232,6 +270,147 @@ impl VisionClassifier {
 
         Ok(enhanced)
     }
+
+    /// Extract wall segments from a blueprint image using GPT-5 Vision
+    ///
+    /// # Arguments
+    /// * `image_base64` - Base64-encoded blueprint image (in normalized 1000x1000 space)
+    ///
+    /// # Returns
+    /// Wall segments, room labels, and confidence score
+    pub async fn extract_wall_segments(
+        &self,
+        image_base64: &str,
+    ) -> anyhow::Result<VisionWallData> {
+        info!("Extracting wall segments from blueprint using GPT-5 Vision");
+
+        let prompt = r#"You are analyzing an architectural blueprint. Extract:
+1. All wall segments as line coordinates in 0-1000 normalized coordinate space
+2. Room labels with their center coordinates and type
+
+IMPORTANT: The image is normalized to 1000x1000 coordinate space where:
+- Top-left corner is (0, 0)
+- Bottom-right corner is (1000, 1000)
+
+Return ONLY valid JSON with this exact structure:
+{
+  "walls": [
+    {"start": {"x": 100, "y": 200}, "end": {"x": 500, "y": 200}},
+    {"start": {"x": 500, "y": 200}, "end": {"x": 500, "y": 600}}
+  ],
+  "rooms": [
+    {"label": "Kitchen", "center": {"x": 300, "y": 400}, "room_type": "kitchen"},
+    {"label": "Bedroom", "center": {"x": 700, "y": 400}, "room_type": "bedroom"}
+  ],
+  "confidence": 0.85
+}
+
+Guidelines:
+- Extract ALL visible wall segments (interior and exterior)
+- Walls should form closed polygons for rooms
+- Room types: kitchen, bedroom, bathroom, living_room, dining_room, hallway, closet, office, etc.
+- Confidence: your overall confidence in the wall extraction (0.0-1.0)
+- Be precise with coordinates - walls should align properly"#;
+
+        // Prepare image URL - check if already has data URI prefix
+        let image_url = if image_base64.starts_with("data:") {
+            image_base64.to_string()
+        } else {
+            format!("data:image/png;base64,{}", image_base64)
+        };
+
+        // Build request
+        let mut request_body = serde_json::json!({
+            "model": self.model.clone(),
+            "messages": vec![serde_json::json!({
+                "role": "user",
+                "content": vec![
+                    serde_json::json!({
+                        "type": "text",
+                        "text": prompt
+                    }),
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    })
+                ]
+            })]
+        });
+
+        // Use appropriate token parameter based on model
+        if self.model.starts_with("gpt-5") || self.model.starts_with("o1") {
+            request_body["max_completion_tokens"] = serde_json::json!(4000);
+        } else {
+            request_body["max_tokens"] = serde_json::json!(4000);
+        }
+
+        info!("Sending wall extraction request to OpenAI API (model: {})", self.model);
+
+        // Call OpenAI API with 60-second timeout
+        let api_call = async {
+            self.client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await
+        };
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            api_call
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            warn!("OpenAI API error: {} - {}", status, error_text);
+            return Err(anyhow::anyhow!("OpenAI API error: {} - {}", status, error_text));
+        }
+
+        let api_response: OpenAIResponse = response.json().await?;
+
+        // Parse response
+        if api_response.choices.is_empty() {
+            return Err(anyhow::anyhow!("No response from OpenAI API"));
+        }
+
+        let content = &api_response.choices[0].message.content;
+        info!("Received wall extraction response from OpenAI");
+
+        // Parse JSON from response
+        let json_str = extract_json_from_response(content)?;
+
+        let mut wall_data: VisionWallData = serde_json::from_str(&json_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse wall data: {}. Response: {}", e, json_str))?;
+
+        // Validate coordinate ranges
+        for wall in &wall_data.walls {
+            if !is_valid_coordinate(&wall.start) || !is_valid_coordinate(&wall.end) {
+                warn!("Invalid wall coordinates detected, clamping to valid range");
+                // We could either clamp or reject, but for robustness let's warn and continue
+            }
+        }
+
+        for room in &wall_data.rooms {
+            if !is_valid_coordinate(&room.center) {
+                warn!("Invalid room center coordinates detected");
+            }
+        }
+
+        // Clamp confidence to valid range
+        wall_data.confidence = wall_data.confidence.clamp(0.0, 1.0);
+
+        info!("Successfully extracted {} walls and {} room labels (confidence: {:.2})",
+            wall_data.walls.len(), wall_data.rooms.len(), wall_data.confidence);
+
+        Ok(wall_data)
+    }
 }
 
 /// Extract JSON from GPT response (handles markdown code blocks)
@@ -253,6 +432,11 @@ fn extract_json_from_response(content: &str) -> anyhow::Result<String> {
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+/// Validate that a coordinate point is within the normalized 0-1000 range
+fn is_valid_coordinate(point: &WallPoint) -> bool {
+    point.x >= 0.0 && point.x <= 1000.0 && point.y >= 0.0 && point.y <= 1000.0
 }
 
 // Re-export types for convenience
