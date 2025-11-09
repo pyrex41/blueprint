@@ -16,6 +16,8 @@ mod graph_builder;
 mod room_detector;
 mod detector_orchestrator;
 mod image_vectorizer;
+mod image_preprocessor;
+mod wall_merger;
 
 use graph_builder::*;
 use room_detector::{detect_rooms, detect_rooms_simple};
@@ -506,6 +508,172 @@ async fn upload_image_handler(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct VectorizeBlueprintRequest {
+    /// Base64-encoded blueprint image
+    image: String,
+    /// Strategy for vectorization: hybrid_vision, vtracer_only, or gpt5_only
+    #[serde(default = "default_vectorization_strategy")]
+    strategy: String,
+    /// Confidence threshold for GPT-5 vision (0.0-1.0)
+    #[serde(default = "default_confidence_threshold")]
+    confidence_threshold: f64,
+    /// Area threshold for room detection
+    #[serde(default = "default_area_threshold")]
+    area_threshold: f64,
+    /// Door gap threshold
+    #[serde(default = "default_door_threshold")]
+    door_threshold: f64,
+}
+
+fn default_vectorization_strategy() -> String {
+    "hybrid_vision".to_string()
+}
+
+fn default_confidence_threshold() -> f64 {
+    0.75
+}
+
+#[derive(Debug, Serialize)]
+struct VectorizeBlueprintResponse {
+    walls: Vec<WallWithSource>,
+    rooms: Vec<EnhancedRoomResponse>,
+    metadata: VectorizationMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct WallWithSource {
+    start: Point,
+    end: Point,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>, // "vtracer", "gpt5", or "consensus"
+}
+
+#[derive(Debug, Serialize)]
+struct EnhancedRoomResponse {
+    id: usize,
+    bounding_box: [f64; 4],
+    area: f64,
+    name_hint: String,
+    points: Vec<Point>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    center: Option<Point>,
+}
+
+#[derive(Debug, Serialize)]
+struct VectorizationMetadata {
+    vtracer_walls_count: usize,
+    gpt5_walls_count: usize,
+    merged_walls_count: usize,
+    gpt5_confidence: f64,
+    method_used: String,
+    execution_time_ms: u128,
+}
+
+async fn vectorize_blueprint_handler(
+    Json(payload): Json<VectorizeBlueprintRequest>,
+) -> Result<Json<VectorizeBlueprintResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received vectorize-blueprint request (strategy: {})", payload.strategy);
+
+    // Decode base64 image
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&payload.image)
+        .map_err(|e| {
+            warn!("Failed to decode base64 image: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_IMAGE".to_string(),
+                    message: format!("Failed to decode base64 image: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Image decoded, size: {} bytes", image_bytes.len());
+
+    // Create orchestrator with hybrid vision strategy
+    let config = detector_orchestrator::DetectorConfig {
+        area_threshold: payload.area_threshold,
+        door_threshold: payload.door_threshold,
+        enable_vision: true,
+        enable_yolo: false,
+        strategy: match payload.strategy.as_str() {
+            "vtracer_only" => detector_orchestrator::CombinationStrategy::GraphOnly,
+            "gpt5_only" => detector_orchestrator::CombinationStrategy::GraphWithVision,
+            _ => detector_orchestrator::CombinationStrategy::HybridVision,
+        },
+    };
+
+    let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
+
+    // Run detection (for hybrid vision, lines are extracted internally)
+    let result = orchestrator
+        .detect_rooms(&[], Some(&image_bytes))
+        .await
+        .map_err(|e| {
+            warn!("Detection failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "DETECTION_FAILED".to_string(),
+                    message: format!("Failed to detect rooms: {}", e),
+                }),
+            )
+        })?;
+
+    info!(
+        "Detection complete: {} rooms detected using {} in {}ms",
+        result.rooms.len(),
+        result.method_used,
+        result.execution_time_ms
+    );
+
+    // For hybrid vision, we need to extract wall information
+    // For now, return empty walls array (could be enhanced to return merged walls)
+    let walls = vec![]; // TODO: Extract from merge result
+
+    // Convert rooms to response format
+    let rooms: Vec<EnhancedRoomResponse> = result
+        .rooms
+        .iter()
+        .map(|r| EnhancedRoomResponse {
+            id: r.room.id,
+            bounding_box: r.room.bounding_box,
+            area: r.room.area,
+            name_hint: r.room.name_hint.clone(),
+            points: r.room.points.clone(),
+            room_type: r.room_type.clone(),
+            confidence: r.confidence,
+            center: r.room_type.as_ref().map(|_| {
+                Point {
+                    x: (r.room.bounding_box[0] + r.room.bounding_box[2]) / 2.0,
+                    y: (r.room.bounding_box[1] + r.room.bounding_box[3]) / 2.0,
+                }
+            }),
+        })
+        .collect();
+
+    // Build metadata
+    let metadata = VectorizationMetadata {
+        vtracer_walls_count: 0, // TODO: Get from merge result
+        gpt5_walls_count: 0,    // TODO: Get from merge result
+        merged_walls_count: 0,  // TODO: Get from merge result
+        gpt5_confidence: 0.0,   // TODO: Get from vision result
+        method_used: result.method_used,
+        execution_time_ms: result.execution_time_ms,
+    };
+
+    Ok(Json(VectorizeBlueprintResponse {
+        walls,
+        rooms,
+        metadata,
+    }))
+}
+
 /// Create the Axum app with all routes and middleware
 /// This is exposed for integration testing
 pub fn create_app() -> Router {
@@ -537,6 +705,7 @@ pub fn create_app() -> Router {
         .route("/detect/simple", post(detect_rooms_simple_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
         .route("/upload-image", post(upload_image_handler))
+        .route("/vectorize-blueprint", post(vectorize_blueprint_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
         .layer(cors)
 }

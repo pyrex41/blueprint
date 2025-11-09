@@ -63,7 +63,7 @@ pub fn vectorize_image(image_bytes: &[u8]) -> Result<Vec<Line>> {
 }
 
 /// Parse SVG paths and convert to line segments
-fn parse_svg_to_lines(svg: &str) -> Result<Vec<Line>> {
+pub fn parse_svg_to_lines(svg: &str) -> Result<Vec<Line>> {
     let mut lines = Vec::new();
 
     // Simple SVG path parser - looks for <path d="..."/> elements
