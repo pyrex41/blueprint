@@ -444,6 +444,10 @@ impl DetectorOrchestrator {
 
         let image_bytes = image_bytes.unwrap();
 
+        // Step 0: Check API key first (fail fast before expensive operations)
+        std::env::var("OPENAI_API_KEY")
+            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+
         // Step 1: Normalize image
         let norm_start = Instant::now();
         let normalized_image = crate::image_preprocessor::NormalizedImage::from_bytes(image_bytes)
@@ -461,9 +465,10 @@ impl DetectorOrchestrator {
         let vtracer_future = async {
             let vtracer_start = Instant::now();
 
-            // VTracer requires file paths, so we need to save to temp files
-            let temp_path = std::env::temp_dir().join(format!("hybrid_{}_input.png", std::process::id()));
-            let svg_path = std::env::temp_dir().join(format!("hybrid_{}_output.svg", std::process::id()));
+            // VTracer requires file paths, use UUID for unique temp file names (prevents race conditions)
+            let request_id = uuid::Uuid::new_v4();
+            let temp_path = std::env::temp_dir().join(format!("hybrid_{}_input.png", request_id));
+            let svg_path = std::env::temp_dir().join(format!("hybrid_{}_output.svg", request_id));
 
             // Save image to temp file
             std::fs::write(&temp_path, image_bytes)?;
@@ -484,15 +489,25 @@ impl DetectorOrchestrator {
             };
 
             // Convert to SVG
-            vtracer::convert_image_to_svg(&temp_path, &svg_path, config)
-                .map_err(|e| anyhow::anyhow!("VTracer failed: {}", e))?;
+            let vtracer_result = vtracer::convert_image_to_svg(&temp_path, &svg_path, config)
+                .map_err(|e| anyhow::anyhow!("VTracer failed: {}", e));
 
-            // Read SVG
-            let svg = std::fs::read_to_string(&svg_path)?;
+            // Read SVG (only if vtracer succeeded)
+            let svg_result = vtracer_result.and_then(|_| {
+                std::fs::read_to_string(&svg_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read SVG: {}", e))
+            });
 
-            // Clean up temp files
-            let _ = std::fs::remove_file(&temp_path);
-            let _ = std::fs::remove_file(&svg_path);
+            // Always clean up temp files, logging failures
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                warn!("Failed to remove temp input file {}: {}", temp_path.display(), e);
+            }
+            if let Err(e) = std::fs::remove_file(&svg_path) {
+                warn!("Failed to remove temp SVG file {}: {}", svg_path.display(), e);
+            }
+
+            // Return SVG processing result
+            let svg = svg_result?;
 
             let vectorizer_lines = crate::image_vectorizer::parse_svg_to_lines(&svg)?;
 
@@ -515,7 +530,7 @@ impl DetectorOrchestrator {
             let api_key = std::env::var("OPENAI_API_KEY")
                 .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
 
-            let classifier = vision_classifier::VisionClassifier::new(api_key, Some("gpt-5".to_string()));
+            let classifier = vision_classifier::VisionClassifier::new(api_key, Some("gpt-4o".to_string()));
 
             let wall_data = classifier
                 .extract_wall_segments(&normalized_image.base64_data)

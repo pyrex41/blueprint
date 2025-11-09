@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-/// Vision-based room classifier using OpenAI GPT-5 Vision API
+/// Vision-based room classifier using OpenAI Vision API (GPT-4o)
 pub struct VisionClassifier {
     client: Client,
     api_key: String,
@@ -96,12 +96,12 @@ impl VisionClassifier {
     ///
     /// # Arguments
     /// * `api_key` - OpenAI API key (from OPENAI_API_KEY environment variable)
-    /// * `model` - Model to use (default: "gpt-5")
+    /// * `model` - Model to use (default: "gpt-4o")
     pub fn new(api_key: String, model: Option<String>) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            model: model.unwrap_or_else(|| "gpt-5".to_string()),
+            model: model.unwrap_or_else(|| "gpt-4o".to_string()),
         }
     }
 
