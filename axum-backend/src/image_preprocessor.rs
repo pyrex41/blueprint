@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{DynamicImage, GenericImageView, ImageFormat, ImageBuffer, Rgba};
+use image::{DynamicImage, GenericImageView, ImageFormat, ImageBuffer, Rgba, Luma, GrayImage};
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 
 /// Standard normalized coordinate space
 pub const NORMALIZED_SIZE: u32 = 1000;
@@ -12,7 +13,8 @@ pub struct NormalizedImage {
     /// Base64-encoded image (PNG format)
     pub base64_data: String,
     /// Original image dimensions (width, height)
-    pub original_dimensions: (u32, u32),
+    pub original_width: u32,
+    pub original_height: u32,
     /// Scale factor applied during normalization
     pub scale_factor: f64,
     /// Padding applied (left, top, right, bottom)
@@ -41,7 +43,8 @@ impl NormalizedImage {
         let img = image::load_from_memory(bytes)
             .context("Failed to decode image")?;
 
-        let (original_width, original_height) = img.dimensions();
+        let original_width = img.width();
+        let original_height = img.height();
 
         // Calculate scale factor to fit within NORMALIZED_SIZE x NORMALIZED_SIZE
         let scale_x = NORMALIZED_SIZE as f64 / original_width as f64;
@@ -77,18 +80,19 @@ impl NormalizedImage {
         let normalized_img = DynamicImage::ImageRgba8(canvas);
         let mut png_bytes = Vec::new();
         normalized_img.write_to(
-            &mut std::io::Cursor::new(&mut png_bytes),
+            &mut Cursor::new(&mut png_bytes),
             ImageFormat::Png,
         )?;
 
         let base64_data = STANDARD.encode(&png_bytes);
 
-        Ok(NormalizedImage {
-            base64_data,
-            original_dimensions: (original_width, original_height),
-            scale_factor,
-            padding: (pad_x, pad_y, pad_x, pad_y),
-        })
+Ok(NormalizedImage {
+    base64_data,
+    original_width,
+    original_height,
+    scale_factor,
+    padding: (pad_x, pad_y, pad_x, pad_y),
+})
     }
 
     /// Convert normalized coordinates back to original image space
@@ -141,10 +145,84 @@ impl NormalizedImage {
             .collect()
     }
 
-    /// Get the base64 data URL for use with vision APIs
-    pub fn to_data_url(&self) -> String {
-        format!("data:image/png;base64,{}", self.base64_data)
+/// Get the base64 data URL for use with vision APIs
+pub fn to_data_url(&self) -> String {
+    format!("data:image/png;base64,{}", self.base64_data)
+}
+
+/// Preprocess image for VTracer: grayscale + edge detection + thresholding
+pub fn preprocess_for_vtracer(&self) -> anyhow::Result<Vec<u8>> {
+    use std::io::Cursor;
+    
+    // Load the normalized image from base64
+    let img_bytes = base64::decode(&self.base64_data)?;
+    let img = image::load_from_memory(&img_bytes)
+        .context("Failed to load preprocessed image")?
+        .to_luma8();
+    
+    // Step 1: Apply Gaussian blur to reduce noise
+    let blurred = image::imageops::blur(&img, 1.0);
+    
+    // Step 2: Simple Sobel edge detection
+    let edges = self.sobel_edge_detect(&blurred);
+    
+    // Step 3: Threshold to create binary image
+    let threshold = 50u8; // Adjustable threshold
+    let binary = self.threshold_image(&edges, threshold);
+    
+    // Step 4: Convert back to RGBA for consistency with normalized format
+    let mut rgba = ImageBuffer::new(NORMALIZED_SIZE, NORMALIZED_SIZE);
+    for (x, y, pixel) in rgba.enumerate_pixels_mut() {
+        if x < binary.width() && y < binary.height() {
+            let gray_val = binary.get_pixel(x, y)[0];
+            *pixel = Rgba([gray_val, gray_val, gray_val, 255]);
+        } else {
+            *pixel = Rgba([255, 255, 255, 255]); // White background
+        }
     }
+    
+    // Encode as PNG
+    let mut buffer = Vec::new();
+    DynamicImage::ImageRgba8(rgba).write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png)?;
+    Ok(buffer)
+}
+
+fn sobel_edge_detect(&self, img: &GrayImage) -> GrayImage {
+    let (width, height) = img.dimensions();
+    let mut edges = GrayImage::new(width, height);
+    
+    for y in 1..height.saturating_sub(1) {
+        for x in 1..width.saturating_sub(1) {
+            // Sobel kernels for X and Y gradients
+            let gx = -(img.get_pixel(x-1, y-1)[0] as i32) - 2 * (img.get_pixel(x-1, y)[0] as i32) - (img.get_pixel(x-1, y+1)[0] as i32)
+                   + (img.get_pixel(x+1, y-1)[0] as i32) + 2 * (img.get_pixel(x+1, y)[0] as i32) + (img.get_pixel(x+1, y+1)[0] as i32);
+
+            let gy = -(img.get_pixel(x-1, y-1)[0] as i32) - 2 * (img.get_pixel(x, y-1)[0] as i32) - (img.get_pixel(x+1, y-1)[0] as i32)
+                   + (img.get_pixel(x-1, y+1)[0] as i32) + 2 * (img.get_pixel(x, y+1)[0] as i32) + (img.get_pixel(x+1, y+1)[0] as i32);
+            
+            let magnitude = ((gx * gx + gy * gy) as f32).sqrt().min(255.0) as u8;
+            edges.put_pixel(x, y, Luma([magnitude]));
+        }
+    }
+    
+    edges
+}
+
+fn threshold_image(&self, img: &GrayImage, threshold: u8) -> GrayImage {
+    let (width, height) = img.dimensions();
+    let mut binary = GrayImage::new(width, height);
+    
+    for (x, y, pixel) in binary.enumerate_pixels_mut() {
+        let val = if img.get_pixel(x, y)[0] > threshold {
+            255u8
+        } else {
+            0u8
+        };
+        *pixel = Luma([val]);
+    }
+    
+    binary
+}
 }
 
 #[cfg(test)]
@@ -157,14 +235,15 @@ mod tests {
         let img = ImageBuffer::from_pixel(500, 500, Rgba([255u8, 255u8, 255u8, 255u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
 
         let normalized = NormalizedImage::from_bytes(&bytes).unwrap();
 
         // Square image should scale by 2.0
         assert_eq!(normalized.scale_factor, 2.0);
-        assert_eq!(normalized.original_dimensions, (500, 500));
+        assert_eq!(normalized.original_width, 500);
+        assert_eq!(normalized.original_height, 500);
         assert_eq!(normalized.padding, (0, 0, 0, 0)); // No padding for square
     }
 
@@ -174,14 +253,15 @@ mod tests {
         let img = ImageBuffer::from_pixel(400, 800, Rgba([255u8, 255u8, 255u8, 255u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
 
         let normalized = NormalizedImage::from_bytes(&bytes).unwrap();
 
         // Height is limiting dimension, scale = 1000/800 = 1.25
         assert_eq!(normalized.scale_factor, 1.25);
-        assert_eq!(normalized.original_dimensions, (400, 800));
+        assert_eq!(normalized.original_width, 400);
+        assert_eq!(normalized.original_height, 800);
 
         // Width after scaling: 400 * 1.25 = 500
         // Padding: (1000 - 500) / 2 = 250 on each side
@@ -195,7 +275,7 @@ mod tests {
         let img = ImageBuffer::from_pixel(500, 500, Rgba([255u8, 255u8, 255u8, 255u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
 
         let normalized = NormalizedImage::from_bytes(&bytes).unwrap();
@@ -215,7 +295,7 @@ mod tests {
         let img = ImageBuffer::from_pixel(600, 400, Rgba([255u8, 255u8, 255u8, 255u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
 
         let normalized = NormalizedImage::from_bytes(&bytes).unwrap();
@@ -234,7 +314,7 @@ mod tests {
         let img = ImageBuffer::from_pixel(100, 100, Rgba([255u8, 255u8, 255u8, 255u8]));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(img)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
 
         let normalized = NormalizedImage::from_bytes(&bytes).unwrap();

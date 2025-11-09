@@ -98,8 +98,14 @@ impl VisionClassifier {
     /// * `api_key` - OpenAI API key (from OPENAI_API_KEY environment variable)
     /// * `model` - Model to use (default: "gpt-5")
     pub fn new(api_key: String, model: Option<String>) -> Self {
+        // Configure client with 300-second timeout for GPT-5 reasoning
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             api_key,
             model: model.unwrap_or_else(|| "gpt-5".to_string()),
         }
@@ -193,7 +199,7 @@ impl VisionClassifier {
 
         info!("Sending request to OpenAI API (model: {})", self.model);
 
-        // Call OpenAI API with 60-second timeout
+        // Call OpenAI API with 180-second timeout
         let api_call = async {
             self.client
                 .post("https://api.openai.com/v1/chat/completions")
@@ -205,11 +211,11 @@ impl VisionClassifier {
         };
 
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(180),
             api_call
         )
         .await
-        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 180 seconds"))??;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -346,9 +352,14 @@ Guidelines:
             request_body["max_tokens"] = serde_json::json!(4000);
         }
 
+        // Enable JSON mode for reliable JSON output (gpt-4o and later support this)
+        if !self.model.starts_with("gpt-3") {
+            request_body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
+
         info!("Sending wall extraction request to OpenAI API (model: {})", self.model);
 
-        // Call OpenAI API with 60-second timeout
+        // Call OpenAI API with 180-second timeout
         let api_call = async {
             self.client
                 .post("https://api.openai.com/v1/chat/completions")
@@ -360,11 +371,11 @@ Guidelines:
         };
 
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(180),
             api_call
         )
         .await
-        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 60 seconds"))??;
+        .map_err(|_| anyhow::anyhow!("OpenAI API request timed out after 180 seconds"))??;
 
         if !response.status().is_success() {
             let status = response.status();

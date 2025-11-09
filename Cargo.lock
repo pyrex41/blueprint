@@ -690,6 +690,7 @@ dependencies = [
  "nalgebra",
  "ordered-float",
  "petgraph",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

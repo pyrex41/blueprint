@@ -336,6 +336,20 @@ struct EnhancedDetectRequest {
     enable_yolo: Option<bool>,
 }
 
+/// SVG detection request
+#[derive(Debug, Deserialize)]
+struct SvgDetectRequest {
+    svg_content: String,
+    #[serde(default = "default_area_threshold")]
+    area_threshold: f64,
+    #[serde(default = "default_door_threshold")]
+    door_threshold: f64,
+    #[serde(default)]
+    strategy: Option<detector_orchestrator::CombinationStrategy>,
+    #[serde(default)]
+    enable_vision: Option<bool>,
+}
+
 /// Enhanced detection handler using the orchestrator
 async fn enhanced_detect_handler(
     Json(request): Json<EnhancedDetectRequest>,
@@ -394,6 +408,7 @@ async fn enhanced_detect_handler(
             .strategy
             .unwrap_or(detector_orchestrator::CombinationStrategy::GraphOnly),
         confidence_threshold: 0.75, // Default for enhanced endpoint
+        vision_model: std::env::var("VISION_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
     };
 
     // Auto-enable vision if API key is set and strategy requires it
@@ -411,7 +426,7 @@ async fn enhanced_detect_handler(
     let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
 
     match orchestrator
-        .detect_rooms(&request.lines, image_bytes.as_deref())
+        .detect_rooms(&request.lines, image_bytes.as_deref(), None)
         .await
     {
         Ok(result) => {
@@ -430,6 +445,84 @@ async fn enhanced_detect_handler(
                 Json(ErrorResponse {
                     error: "DETECTION_FAILED".to_string(),
                     message: format!("Detection failed: {}", e),
+                }),
+            ))
+        }
+    }
+}
+
+/// SVG detection handler
+async fn svg_detect_handler(
+    Json(request): Json<SvgDetectRequest>,
+) -> Result<Json<detector_orchestrator::DetectionResult>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received SVG detection request with {} chars of SVG content", request.svg_content.len());
+
+    // Validate input size
+    if request.svg_content.len() > 10 * 1024 * 1024 { // 10MB limit
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: "SVG content too large. Maximum 10MB allowed.".to_string(),
+            }),
+        ));
+    }
+
+    if request.svg_content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "EMPTY_SVG".to_string(),
+                message: "SVG content cannot be empty".to_string(),
+            }),
+        ));
+    }
+
+    // Build orchestrator config
+    let mut config = detector_orchestrator::DetectorConfig {
+        area_threshold: request.area_threshold,
+        door_threshold: request.door_threshold,
+        enable_vision: request.enable_vision.unwrap_or(false),
+        enable_yolo: false, // SVG doesn't support YOLO yet
+        strategy: request
+            .strategy
+            .unwrap_or(detector_orchestrator::CombinationStrategy::SvgOnly),
+        confidence_threshold: 0.75, // Default for SVG endpoint
+        vision_model: std::env::var("VISION_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
+    };
+
+    // Auto-enable vision if API key is set and strategy requires it
+    if matches!(
+        config.strategy,
+        detector_orchestrator::CombinationStrategy::SvgWithVision
+    ) && std::env::var("OPENAI_API_KEY").is_ok()
+    {
+        config.enable_vision = true;
+    }
+
+    // Create orchestrator and run detection
+    let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
+
+    match orchestrator
+        .detect_rooms(&[], None, Some(&request.svg_content))
+        .await
+    {
+        Ok(result) => {
+            info!(
+                "SVG detection completed: {} rooms, method: {}, time: {}ms",
+                result.rooms.len(),
+                result.method_used,
+                result.execution_time_ms
+            );
+            Ok(Json(result))
+        }
+        Err(e) => {
+            warn!("SVG detection failed: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "DETECTION_FAILED".to_string(),
+                    message: format!("SVG detection failed: {}", e),
                 }),
             ))
         }
@@ -470,7 +563,17 @@ async fn upload_image_handler(
     info!("Image decoded, size: {} bytes", image_bytes.len());
 
     // Vectorize image to extract lines
-    let extracted_lines = image_vectorizer::vectorize_image(&image_bytes).map_err(|e| {
+    let extracted_lines = tokio::spawn(async move {
+        image_vectorizer::vectorize_image_ai(&image_bytes).await
+    }).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "VECTORIZATION_FAILED".to_string(),
+                message: format!("Async vectorization failed: {}", e),
+            }),
+        )
+    })?.map_err(|e| {
         warn!("Vectorization failed: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -525,6 +628,13 @@ struct VectorizeBlueprintRequest {
     /// Door gap threshold
     #[serde(default = "default_door_threshold")]
     door_threshold: f64,
+    /// Vision model to use (gpt-4o-mini, gpt-4o, gpt-5)
+    #[serde(default = "default_vision_model_api")]
+    vision_model: String,
+}
+
+fn default_vision_model_api() -> String {
+    std::env::var("VISION_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string())
 }
 
 fn default_vectorization_strategy() -> String {
@@ -603,18 +713,19 @@ async fn vectorize_blueprint_handler(
         enable_vision: true,
         enable_yolo: false,
         strategy: match payload.strategy.as_str() {
-            "vtracer_only" => detector_orchestrator::CombinationStrategy::GraphOnly,
+            "vtracer_only" => detector_orchestrator::CombinationStrategy::VTracerOnly,
             "gpt5_only" => detector_orchestrator::CombinationStrategy::GraphWithVision,
             _ => detector_orchestrator::CombinationStrategy::HybridVision,
         },
         confidence_threshold: payload.confidence_threshold,
+        vision_model: payload.vision_model,
     };
 
     let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
 
     // Run detection (for hybrid vision, lines are extracted internally)
     let result = orchestrator
-        .detect_rooms(&[], Some(&image_bytes))
+        .detect_rooms(&[], Some(&image_bytes), None)
         .await
         .map_err(|e| {
             warn!("Detection failed: {}", e);
@@ -694,7 +805,7 @@ async fn vectorize_blueprint_handler(
 pub fn create_app() -> Router {
     // Configure CORS from environment or use localhost for development
     let allowed_origins = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082".to_string());
 
     let origins: Vec<_> = allowed_origins
         .split(',')
@@ -719,6 +830,7 @@ pub fn create_app() -> Router {
         .route("/detect", post(detect_rooms_handler))
         .route("/detect/simple", post(detect_rooms_simple_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
+        .route("/detect/svg", post(svg_detect_handler))
         .route("/upload-image", post(upload_image_handler))
         .route("/vectorize-blueprint", post(vectorize_blueprint_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images

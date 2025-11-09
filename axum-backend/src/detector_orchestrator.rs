@@ -25,10 +25,19 @@ pub struct DetectorConfig {
     /// Confidence threshold for hybrid vision merge strategy (0.0-1.0)
     #[serde(default = "default_confidence_threshold")]
     pub confidence_threshold: f64,
+    /// Vision model to use (gpt-4o-mini, gpt-4o, gpt-5, etc.)
+    #[serde(default = "default_vision_model")]
+    pub vision_model: String,
 }
 
 fn default_confidence_threshold() -> f64 {
     0.75
+}
+
+fn default_vision_model() -> String {
+    // Use gpt-4o-mini by default for speed and cost efficiency
+    // Can be overridden with VISION_MODEL env var
+    std::env::var("VISION_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string())
 }
 
 impl Default for DetectorConfig {
@@ -40,6 +49,7 @@ impl Default for DetectorConfig {
             enable_yolo: false,   // Disabled until model is trained
             strategy: CombinationStrategy::GraphOnly,
             confidence_threshold: 0.75,
+            vision_model: default_vision_model(),
         }
     }
 }
@@ -58,6 +68,12 @@ pub enum CombinationStrategy {
     Ensemble,
     /// Hybrid vision: VTracer + GPT-5 Vision merged wall extraction
     HybridVision,
+    /// VTracer only: Extract lines from raster image, then graph-based detection
+    VTracerOnly,
+    /// Parse SVG directly and detect rooms geometrically
+    SvgOnly,
+    /// Parse SVG + vision classification for room types
+    SvgWithVision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +137,7 @@ impl DetectorOrchestrator {
         &self,
         lines: &[Line],
         image_bytes: Option<&[u8]>,
+        svg_content: Option<&str>,
     ) -> anyhow::Result<DetectionResult> {
         let start = Instant::now();
         let mut method_timings = Vec::new();
@@ -148,6 +165,16 @@ impl DetectorOrchestrator {
             CombinationStrategy::HybridVision => {
                 self.detect_hybrid_vision(image_bytes, &mut method_timings)
                     .await
+            }
+            CombinationStrategy::VTracerOnly => {
+                self.detect_vtracer_only(image_bytes, &mut method_timings)
+                    .await
+            }
+            CombinationStrategy::SvgOnly => {
+                self.detect_svg_only(svg_content, &mut method_timings).await
+            }
+            CombinationStrategy::SvgWithVision => {
+                self.detect_svg_with_vision(svg_content, &mut method_timings).await
             }
         }
         .map(|mut result| {
@@ -470,8 +497,11 @@ impl DetectorOrchestrator {
             let temp_path = std::env::temp_dir().join(format!("hybrid_{}_input.png", request_id));
             let svg_path = std::env::temp_dir().join(format!("hybrid_{}_output.svg", request_id));
 
-            // Save image to temp file
-            std::fs::write(&temp_path, image_bytes)?;
+// Preprocess image for VTracer
+let preprocessed_bytes = normalized_image.preprocess_for_vtracer()?;
+
+// Save preprocessed image to temp file
+std::fs::write(&temp_path, &preprocessed_bytes)?;
 
             // Configure VTracer
             let config = vtracer::Config {
@@ -530,7 +560,7 @@ impl DetectorOrchestrator {
             let api_key = std::env::var("OPENAI_API_KEY")
                 .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
 
-            let classifier = vision_classifier::VisionClassifier::new(api_key, Some("gpt-5".to_string()));
+            let classifier = vision_classifier::VisionClassifier::new(api_key, Some(self.config.vision_model.clone()));
 
             let wall_data = classifier
                 .extract_wall_segments(&normalized_image.base64_data)
@@ -721,6 +751,242 @@ impl DetectorOrchestrator {
                 merged_walls: Some(merge_result.walls),
             },
         })
+    }
+
+    /// VTracer-only detection: Extract lines from raster image, then graph-based detection
+    async fn detect_vtracer_only(
+        &self,
+        image_bytes: Option<&[u8]>,
+        timings: &mut Vec<(String, u128)>,
+    ) -> anyhow::Result<DetectionResult> {
+        if image_bytes.is_none() {
+            return Err(anyhow::anyhow!("VTracer detection requires image data"));
+        }
+
+        let image_bytes = image_bytes.unwrap();
+
+        info!("Starting VTracer-only detection");
+
+        // Step 1: Normalize image
+        let norm_start = Instant::now();
+        let normalized_image = crate::image_preprocessor::NormalizedImage::from_bytes(image_bytes)
+            .map_err(|e| anyhow::anyhow!("Image normalization failed: {}", e))?;
+
+        let norm_elapsed = norm_start.elapsed().as_millis();
+        timings.push(("image_normalization".to_string(), norm_elapsed));
+        info!("Image normalized in {}ms", norm_elapsed);
+
+        // Step 2: Run VTracer
+        let vtracer_start = Instant::now();
+
+        // VTracer requires file paths, use UUID for unique temp file names
+        let request_id = uuid::Uuid::new_v4();
+        let temp_path = std::env::temp_dir().join(format!("vtracer_{}_input.png", request_id));
+        let svg_path = std::env::temp_dir().join(format!("vtracer_{}_output.svg", request_id));
+
+// Preprocess image for VTracer
+let preprocessed_bytes = normalized_image.preprocess_for_vtracer()
+    .map_err(|e| anyhow::anyhow!("VTracer preprocessing failed: {}", e))?;
+
+// Save preprocessed image to temp file
+std::fs::write(&temp_path, &preprocessed_bytes)?;
+
+        // Configure VTracer for blueprint detection
+        // Use Color mode instead of Binary to handle colored/grayscale blueprints
+        let config = vtracer::Config {
+            color_mode: vtracer::ColorMode::Binary,  // Switch to Binary for better line extraction from blueprints
+            hierarchical: vtracer::Hierarchical::Stacked,
+            mode: visioncortex::PathSimplifyMode::Spline,
+            filter_speckle: 2,  // Reduce to capture more lines, less filtering
+            color_precision: 4,  // Reduced for better grouping of similar colors
+            layer_difference: 8,  // Reduced for better edge detection
+            corner_threshold: 50,  // Lower for more detailed corner detection
+            length_threshold: 2.0,  // Lower to include shorter line segments
+            max_iterations: 15,  // Increased for better convergence
+            splice_threshold: 30,  // Lower for more aggressive line splicing
+            path_precision: Some(2),  // Reduced for simpler paths
+        };
+
+        // Convert to SVG
+        vtracer::convert_image_to_svg(&temp_path, &svg_path, config)
+            .map_err(|e| anyhow::anyhow!("VTracer failed: {}", e))?;
+
+        // Read SVG
+        let svg = std::fs::read_to_string(&svg_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read SVG: {}", e))?;
+
+        // Clean up temp files
+        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(&svg_path);
+
+        // Parse SVG to lines
+        let vectorizer_lines = crate::image_vectorizer::parse_svg_to_lines(&svg)?;
+
+        // Convert to crate::Line
+        let lines: Vec<Line> = vectorizer_lines.iter().map(|vl| Line {
+            start: crate::Point { x: vl.start.x, y: vl.start.y },
+            end: crate::Point { x: vl.end.x, y: vl.end.y },
+            is_load_bearing: false,
+        }).collect();
+
+        let vtracer_elapsed = vtracer_start.elapsed().as_millis();
+        timings.push(("vtracer_vectorization".to_string(), vtracer_elapsed));
+        info!("VTracer extracted {} lines in {}ms from preprocessed image", lines.len(), vtracer_elapsed);
+
+        // Step 3: Build graph from extracted lines
+        let graph_start = Instant::now();
+        let graph = crate::graph_builder::build_graph(&lines);
+
+        let graph_elapsed = graph_start.elapsed().as_millis();
+        timings.push(("graph_building".to_string(), graph_elapsed));
+        info!("Graph built in {}ms", graph_elapsed);
+
+        // Step 4: Detect rooms
+        let detection_start = Instant::now();
+        let rooms = crate::room_detector::detect_rooms(
+            &graph,
+            self.config.area_threshold,
+            1.5, // Default outer boundary ratio
+        );
+
+        let detection_elapsed = detection_start.elapsed().as_millis();
+        timings.push(("room_detection".to_string(), detection_elapsed));
+        info!("Detected {} rooms in {}ms", rooms.len(), detection_elapsed);
+
+        // Convert to EnhancedRoom format (without vision classification)
+        let enhanced_rooms: Vec<EnhancedRoom> = rooms
+            .into_iter()
+            .map(|room| EnhancedRoom {
+                room,
+                room_type: None,
+                confidence: None,
+                features: Vec::new(),
+                detection_method: "vtracer_only".to_string(),
+            })
+            .collect();
+
+        Ok(DetectionResult {
+            rooms: enhanced_rooms.clone(),
+            method_used: "vtracer_only".to_string(),
+            execution_time_ms: 0, // Will be set by caller
+            metadata: DetectionMetadata {
+                graph_based_rooms: enhanced_rooms.len(),
+                vision_classified: 0,
+                yolo_detected: 0,
+                total_execution_time_ms: 0, // Will be set by caller
+                method_timings: timings.clone(),
+                vtracer_walls_count: Some(lines.len()),
+                gpt5_walls_count: None,
+                merged_walls_count: None,
+                consensus_walls_count: None,
+                gpt5_confidence: None,
+                merge_strategy: None,
+                merged_walls: None,
+            },
+        })
+    }
+
+    /// SVG-only detection: Parse SVG directly and detect rooms geometrically
+    async fn detect_svg_only(
+        &self,
+        svg_content: Option<&str>,
+        timings: &mut Vec<(String, u128)>,
+    ) -> anyhow::Result<DetectionResult> {
+        if svg_content.is_none() {
+            return Err(anyhow::anyhow!("SVG detection requires SVG content"));
+        }
+
+        let svg_content = svg_content.unwrap();
+        let start = Instant::now();
+
+        // Parse SVG to extract lines
+        let svg_lines = crate::image_vectorizer::parse_svg_to_lines(svg_content)?;
+
+        // Convert to crate::Line format
+        let lines: Vec<Line> = svg_lines
+            .into_iter()
+            .map(|vl| Line {
+                start: crate::Point { x: vl.start.x, y: vl.start.y },
+                end: crate::Point { x: vl.end.x, y: vl.end.y },
+                is_load_bearing: vl.is_load_bearing,
+            })
+            .collect();
+
+        let parse_elapsed = start.elapsed().as_millis();
+        timings.push(("svg_parsing".to_string(), parse_elapsed));
+        info!("Parsed {} lines from SVG in {}ms", lines.len(), parse_elapsed);
+
+        // Build graph and detect rooms
+        let graph_start = Instant::now();
+        let graph = crate::graph_builder::build_graph_with_door_threshold(
+            &lines,
+            self.config.door_threshold,
+        );
+
+        let rooms = crate::room_detector::detect_rooms(
+            &graph,
+            self.config.area_threshold,
+            1.5, // Default outer boundary ratio
+        );
+
+        let graph_elapsed = graph_start.elapsed().as_millis();
+        timings.push(("graph_detection".to_string(), graph_elapsed));
+
+        info!("SVG detection found {} rooms in {}ms", rooms.len(), parse_elapsed + graph_elapsed);
+
+        let enhanced_rooms: Vec<EnhancedRoom> = rooms
+            .into_iter()
+            .map(|room| EnhancedRoom {
+                room,
+                room_type: None,
+                confidence: None,
+                features: Vec::new(),
+                detection_method: "svg".to_string(),
+            })
+            .collect();
+
+        Ok(DetectionResult {
+            rooms: enhanced_rooms.clone(),
+            method_used: "svg_only".to_string(),
+            execution_time_ms: parse_elapsed + graph_elapsed,
+            metadata: DetectionMetadata {
+                graph_based_rooms: enhanced_rooms.len(),
+                vision_classified: 0,
+                yolo_detected: 0,
+                total_execution_time_ms: parse_elapsed + graph_elapsed,
+                method_timings: timings.clone(),
+                vtracer_walls_count: None,
+                gpt5_walls_count: None,
+                merged_walls_count: Some(lines.len()),
+                consensus_walls_count: None,
+                gpt5_confidence: None,
+                merge_strategy: None,
+                merged_walls: None,
+            },
+        })
+    }
+
+    /// SVG detection + Vision classification
+    async fn detect_svg_with_vision(
+        &self,
+        svg_content: Option<&str>,
+        timings: &mut Vec<(String, u128)>,
+    ) -> anyhow::Result<DetectionResult> {
+        // First do SVG-only detection
+        let svg_result = self.detect_svg_only(svg_content, timings).await?;
+
+        // If vision is disabled, return SVG-only results
+        if !self.config.enable_vision {
+            warn!("Vision classification requested but vision disabled");
+            return Ok(svg_result);
+        }
+
+        // For vision classification, we need an image. Since we only have SVG,
+        // we'll need to render it to an image first, or skip vision classification.
+        // For now, return SVG-only results with a warning.
+        warn!("SVG with vision requested but image rendering not yet implemented - returning SVG-only results");
+
+        Ok(svg_result)
     }
 
     /// Classify rooms using vision API
