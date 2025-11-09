@@ -47,6 +47,9 @@ enum DetectionStrategy {
     YoloOnly,
     BestAvailable,
     Ensemble,
+    HybridVision,
+    VTracerOnly,
+    Gpt5Only,
 }
 
 impl DetectionStrategy {
@@ -58,6 +61,9 @@ impl DetectionStrategy {
             Self::YoloOnly => "YoloOnly",
             Self::BestAvailable => "BestAvailable",
             Self::Ensemble => "Ensemble",
+            Self::HybridVision => "hybrid_vision",
+            Self::VTracerOnly => "vtracer_only",
+            Self::Gpt5Only => "gpt5_only",
         }
     }
 
@@ -69,6 +75,9 @@ impl DetectionStrategy {
             Self::YoloOnly => "ML-based detection (not available yet)",
             Self::BestAvailable => "Auto-fallback to best available method",
             Self::Ensemble => "Run all methods, return best result",
+            Self::HybridVision => "Hybrid Vision Pipeline - Combines VTracer + GPT-5 AI for blueprint vectorization",
+            Self::VTracerOnly => "VTracer Only - Pure vectorization without AI classification",
+            Self::Gpt5Only => "GPT-5 Only - Pure AI-based blueprint analysis",
         }
     }
 }
@@ -122,7 +131,7 @@ fn FloorplanDetector() -> impl IntoView {
     let door_threshold = RwSignal::new(50.0);
     let coverage_threshold = RwSignal::new(0.3); // 30% minimum coverage for dividers
     let outer_boundary_ratio = RwSignal::new(1.5); // 1.5x area ratio for boundary filtering
-    let strategy = RwSignal::new(DetectionStrategy::Simple);
+    let strategy = RwSignal::new(DetectionStrategy::HybridVision);
     let method_used = RwSignal::new(Option::<String>::None);
     let execution_time = RwSignal::new(Option::<u64>::None);
 
@@ -163,71 +172,68 @@ fn FloorplanDetector() -> impl IntoView {
                         onload.forget();
                         let _ = reader.read_as_text(&file);
                     }
-                    // Check if it's an image file
-                    else if file_type.starts_with("image/") {
-                        // Handle image file - read as base64 and send to /upload-image endpoint
-                        loading.set(true);
-                        error.set(None);
+// Check if it's an image file
+else if file_type.starts_with("image/") {
+    // Handle image file - read as base64 and send to /vectorize-blueprint endpoint
+    loading.set(true);
+    error.set(None);
 
-                        let reader = web_sys::FileReader::new().unwrap();
-                        let reader_clone = reader.clone();
+    let reader = web_sys::FileReader::new().unwrap();
+    let reader_clone = reader.clone();
 
-                        let current_area_threshold = area_threshold.get();
-                        let current_door_threshold = door_threshold.get();
+    let current_strategy = strategy.get();
 
-                        let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                            if let Ok(result) = reader_clone.result() {
-                                if let Some(data_url) = result.as_string() {
-                                    // Extract base64 data (remove "data:image/...;base64," prefix)
-                                    if let Some(base64_data) = data_url.split(',').nth(1) {
-                                        let base64_owned = base64_data.to_string();
+    let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        if let Ok(result) = reader_clone.result() {
+            if let Some(data_url) = result.as_string() {
+                // Extract base64 data (remove "data:image/...;base64," prefix)
+                if let Some(base64_data) = data_url.split(',').nth(1) {
+                    let base64_owned = base64_data.to_string();
 
-                                        spawn_local(async move {
-                                            #[derive(Serialize)]
-                                            struct UploadImageRequest {
-                                                image: String,
-                                                area_threshold: f64,
-                                                door_threshold: Option<f64>,
-                                            }
+                    spawn_local(async move {
+                        #[derive(Serialize)]
+                        struct VectorizeRequest {
+                            image: String,
+                            strategy: String,
+                        }
 
-                                            let request = UploadImageRequest {
-                                                image: base64_owned,
-                                                area_threshold: current_area_threshold,
-                                                door_threshold: Some(current_door_threshold),
-                                            };
+                        let request = VectorizeRequest {
+                            image: base64_owned,
+                            strategy: current_strategy.as_str().to_string(),
+                        };
 
-                                            match send_image_request(request).await {
-                                                Ok(response) => {
-                                                    // Extract rooms from response
-                                                    if let Some(rooms_array) = response.get("rooms") {
-                                                        if let Ok(parsed_rooms) = serde_json::from_value::<Vec<Room>>(rooms_array.clone()) {
-                                                            rooms.set(parsed_rooms);
-                                                        }
-                                                    }
-                                                    // Extract lines for visualization
-                                                    if let Some(lines_count) = response.get("lines_extracted") {
-                                                        // Note: We don't get the actual lines back from /upload-image
-                                                        // So we just clear the lines display
-                                                        lines.set(Vec::new());
-                                                    }
-                                                    loading.set(false);
-                                                    error.set(None);
-                                                }
-                                                Err(e) => {
-                                                    error.set(Some(format!("Image upload failed: {}", e)));
-                                                    loading.set(false);
-                                                }
-                                            }
-                                        });
+                        match vectorize_blueprint(request).await {
+                            Ok(response) => {
+                                // Extract rooms from response
+                                if let Some(rooms_array) = response.get("rooms") {
+                                    if let Ok(parsed_rooms) = serde_json::from_value::<Vec<Room>>(rooms_array.clone()) {
+                                        rooms.set(parsed_rooms);
                                     }
                                 }
+                                // Extract lines for visualization
+                                if let Some(lines_array) = response.get("lines") {
+                                    if let Ok(parsed_lines) = serde_json::from_value::<Vec<Line>>(lines_array.clone()) {
+                                        lines.set(parsed_lines);
+                                    }
+                                }
+                                loading.set(false);
+                                error.set(None);
                             }
-                        }) as Box<dyn FnMut(_)>);
+                            Err(e) => {
+                                error.set(Some(format!("Vectorization failed: {}", e)));
+                                loading.set(false);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }) as Box<dyn FnMut(_)>);
 
-                        reader.set_onload(Some(onload.as_ref().unchecked_ref()));
-                        onload.forget();
-                        let _ = reader.read_as_data_url(&file);
-                    } else {
+    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+    onload.forget();
+    let _ = reader.read_as_data_url(&file);
+} else {
                         error.set(Some("Please upload a JSON or image file".to_string()));
                     }
                 }
@@ -293,14 +299,14 @@ fn FloorplanDetector() -> impl IntoView {
 
     view! {
         <div class="container">
-            <header>
-                <h1>"Floorplan Room Detector"</h1>
-                <p>"Upload a JSON file with blueprint lines to detect rooms"</p>
-            </header>
+<header>
+    <h1>"Floorplan Room Detector"</h1>
+    <p>"Upload JSON lines or blueprint images (PNG/JPG) for AI-powered room detection"</p>
+</header>
 
             <div class="controls">
                 <div class="file-upload">
-                    <label for="file-input">"Upload Blueprint (JSON or Image):"</label>
+                    <label for="file-input">"Upload Blueprint (JSON lines or PNG/JPG image):"</label>
                     <input
                         type="file"
                         id="file-input"
@@ -315,25 +321,31 @@ fn FloorplanDetector() -> impl IntoView {
                     <select
                         id="strategy"
                         on:change=move |ev| {
-                            let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlSelectElement>().value();
-                            let new_strategy = match val.as_str() {
-                                "Simple" => DetectionStrategy::Simple,
-                                "GraphOnly" => DetectionStrategy::GraphOnly,
-                                "GraphWithVision" => DetectionStrategy::GraphWithVision,
-                                "YoloOnly" => DetectionStrategy::YoloOnly,
-                                "BestAvailable" => DetectionStrategy::BestAvailable,
-                                "Ensemble" => DetectionStrategy::Ensemble,
-                                _ => DetectionStrategy::Simple,
-                            };
-                            strategy.set(new_strategy);
+let val = ev.target().unwrap().unchecked_into::<web_sys::HtmlSelectElement>().value();
+let new_strategy = match val.as_str() {
+    "HybridVision" => DetectionStrategy::HybridVision,
+    "VTracerOnly" => DetectionStrategy::VTracerOnly,
+    "Gpt5Only" => DetectionStrategy::Gpt5Only,
+    "Simple" => DetectionStrategy::Simple,
+    "GraphOnly" => DetectionStrategy::GraphOnly,
+    "GraphWithVision" => DetectionStrategy::GraphWithVision,
+    "YoloOnly" => DetectionStrategy::YoloOnly,
+    "BestAvailable" => DetectionStrategy::BestAvailable,
+    "Ensemble" => DetectionStrategy::Ensemble,
+    _ => DetectionStrategy::HybridVision,
+};
+strategy.set(new_strategy);
                         }
                     >
-                        <option value="Simple" selected>"Simple (Divider-based)"</option>
-                        <option value="GraphOnly">"Graph (Cycle Detection)"</option>
-                        <option value="GraphWithVision">"Graph + Vision (AI)"</option>
-                        <option value="YoloOnly">"YOLO Only (Not Ready)"</option>
-                        <option value="BestAvailable">"Best Available"</option>
-                        <option value="Ensemble">"Ensemble (All Methods)"</option>
+<option value="HybridVision" selected>"Hybrid Vision (VTracer + GPT-5)"</option>
+<option value="VTracerOnly">"VTracer Only"</option>
+<option value="Gpt5Only">"GPT-5 Only"</option>
+<option value="Simple">"Simple (Divider-based)"</option>
+<option value="GraphOnly">"Graph (Cycle Detection)"</option>
+<option value="GraphWithVision">"Graph + Vision (AI)"</option>
+<option value="YoloOnly">"YOLO Only (Not Ready)"</option>
+<option value="BestAvailable">"Best Available"</option>
+<option value="Ensemble">"Ensemble (All Methods)"</option>
                     </select>
                     <p style="font-size: 12px; color: #666; margin-top: 4px;">
                         {move || strategy.get().description()}
@@ -478,11 +490,11 @@ fn FloorplanDetector() -> impl IntoView {
     }
 }
 
-async fn send_image_request<T: Serialize>(request: T) -> Result<serde_json::Value, String> {
+async fn vectorize_blueprint<T: Serialize>(request: T) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
 
     let response = client
-        .post("http://localhost:3000/upload-image")
+        .post("http://localhost:3000/vectorize-blueprint")
         .json(&request)
         .send()
         .await
