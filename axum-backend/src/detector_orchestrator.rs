@@ -530,7 +530,7 @@ impl DetectorOrchestrator {
             let api_key = std::env::var("OPENAI_API_KEY")
                 .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
 
-            let classifier = vision_classifier::VisionClassifier::new(api_key, Some("gpt-4o".to_string()));
+            let classifier = vision_classifier::VisionClassifier::new(api_key, Some("gpt-5".to_string()));
 
             let wall_data = classifier
                 .extract_wall_segments(&normalized_image.base64_data)
