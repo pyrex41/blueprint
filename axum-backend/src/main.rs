@@ -393,6 +393,7 @@ async fn enhanced_detect_handler(
         strategy: request
             .strategy
             .unwrap_or(detector_orchestrator::CombinationStrategy::GraphOnly),
+        confidence_threshold: 0.75, // Default for enhanced endpoint
     };
 
     // Auto-enable vision if API key is set and strategy requires it
@@ -606,6 +607,7 @@ async fn vectorize_blueprint_handler(
             "gpt5_only" => detector_orchestrator::CombinationStrategy::GraphWithVision,
             _ => detector_orchestrator::CombinationStrategy::HybridVision,
         },
+        confidence_threshold: payload.confidence_threshold,
     };
 
     let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
@@ -632,9 +634,22 @@ async fn vectorize_blueprint_handler(
         result.execution_time_ms
     );
 
-    // For hybrid vision, we need to extract wall information
-    // For now, return empty walls array (could be enhanced to return merged walls)
-    let walls = vec![]; // TODO: Extract from merge result
+    // Extract walls from metadata (if available from hybrid vision)
+    let walls: Vec<WallWithSource> = result
+        .metadata
+        .merged_walls
+        .as_ref()
+        .map(|merged_walls| {
+            merged_walls
+                .iter()
+                .map(|w| WallWithSource {
+                    start: Point { x: w.start.x, y: w.start.y },
+                    end: Point { x: w.end.x, y: w.end.y },
+                    source: w.source.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Convert rooms to response format
     let rooms: Vec<EnhancedRoomResponse> = result
@@ -657,12 +672,12 @@ async fn vectorize_blueprint_handler(
         })
         .collect();
 
-    // Build metadata
+    // Build metadata from detection result
     let metadata = VectorizationMetadata {
-        vtracer_walls_count: 0, // TODO: Get from merge result
-        gpt5_walls_count: 0,    // TODO: Get from merge result
-        merged_walls_count: 0,  // TODO: Get from merge result
-        gpt5_confidence: 0.0,   // TODO: Get from vision result
+        vtracer_walls_count: result.metadata.vtracer_walls_count.unwrap_or(0),
+        gpt5_walls_count: result.metadata.gpt5_walls_count.unwrap_or(0),
+        merged_walls_count: result.metadata.merged_walls_count.unwrap_or(0),
+        gpt5_confidence: result.metadata.gpt5_confidence.unwrap_or(0.0),
         method_used: result.method_used,
         execution_time_ms: result.execution_time_ms,
     };

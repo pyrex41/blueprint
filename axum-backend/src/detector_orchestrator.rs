@@ -22,6 +22,13 @@ pub struct DetectorConfig {
     pub enable_yolo: bool,
     /// Strategy for combining results
     pub strategy: CombinationStrategy,
+    /// Confidence threshold for hybrid vision merge strategy (0.0-1.0)
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+}
+
+fn default_confidence_threshold() -> f64 {
+    0.75
 }
 
 impl Default for DetectorConfig {
@@ -32,6 +39,7 @@ impl Default for DetectorConfig {
             enable_vision: false, // Disabled by default (requires API key)
             enable_yolo: false,   // Disabled until model is trained
             strategy: CombinationStrategy::GraphOnly,
+            confidence_threshold: 0.75,
         }
     }
 }
@@ -82,6 +90,21 @@ pub struct DetectionMetadata {
     pub yolo_detected: usize,
     pub total_execution_time_ms: u128,
     pub method_timings: Vec<(String, u128)>,
+    // Hybrid vision specific metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vtracer_walls_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpt5_walls_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_walls_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consensus_walls_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpt5_confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_walls: Option<Vec<crate::wall_merger::Line>>,
 }
 
 impl DetectorOrchestrator {
@@ -181,6 +204,13 @@ impl DetectorOrchestrator {
                 yolo_detected: 0,
                 total_execution_time_ms: elapsed,
                 method_timings: timings.clone(),
+                vtracer_walls_count: None,
+                gpt5_walls_count: None,
+                merged_walls_count: None,
+                consensus_walls_count: None,
+                gpt5_confidence: None,
+                merge_strategy: None,
+                merged_walls: None,
             },
         })
     }
@@ -233,6 +263,13 @@ impl DetectorOrchestrator {
                         yolo_detected: 0,
                         total_execution_time_ms: 0, // Will be set by caller
                         method_timings: timings.clone(),
+                        vtracer_walls_count: None,
+                        gpt5_walls_count: None,
+                        merged_walls_count: None,
+                        consensus_walls_count: None,
+                        gpt5_confidence: None,
+                        merge_strategy: None,
+                        merged_walls: None,
                     },
                 })
             }
@@ -317,6 +354,13 @@ impl DetectorOrchestrator {
                 yolo_detected: enhanced_rooms.len(),
                 total_execution_time_ms: elapsed,
                 method_timings: timings.clone(),
+                vtracer_walls_count: None,
+                gpt5_walls_count: None,
+                merged_walls_count: None,
+                consensus_walls_count: None,
+                gpt5_confidence: None,
+                merge_strategy: None,
+                merged_walls: None,
             },
         })
     }
@@ -558,7 +602,7 @@ impl DetectorOrchestrator {
             vtracer_walls_for_merge,
             vision_walls_for_merge,
             vision_data.confidence,
-            0.75, // Default threshold
+            self.config.confidence_threshold,
         );
 
         let merge_elapsed = merge_start.elapsed().as_millis();
@@ -653,6 +697,13 @@ impl DetectorOrchestrator {
                 yolo_detected: 0,
                 total_execution_time_ms: 0, // Will be set by caller
                 method_timings: timings.clone(),
+                vtracer_walls_count: Some(merge_result.metadata.vtracer_count),
+                gpt5_walls_count: Some(merge_result.metadata.gpt5_count),
+                merged_walls_count: Some(merge_result.metadata.merged_count),
+                consensus_walls_count: Some(merge_result.metadata.consensus_count),
+                gpt5_confidence: Some(vision_data.confidence),
+                merge_strategy: Some(merge_result.metadata.strategy_used.clone()),
+                merged_walls: Some(merge_result.walls),
             },
         })
     }
