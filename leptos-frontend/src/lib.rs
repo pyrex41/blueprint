@@ -111,6 +111,28 @@ enum InputType {
     Svg,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SvgParser {
+    Algorithmic,  // Fast geometric parsing
+    Gpt5Nano,     // AI text model interprets SVG
+    Combined,     // Run both parsers and compare
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ImageVisionChoice {
+    NoVision,      // y paths: Vectorize only, then parse SVG
+    VisionOnly,    // x path: Pure AI, skip SVG vectorization
+    VisionWithSvg, // z paths: Hybrid - vectorize, parse, merge with AI vision
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum VisionMode {
+    None,           // No vision enhancement
+    Classification, // Add room type classification
+    Hybrid,         // Merge vision walls with vectorized walls (images only)
+    VisionOnly,     // Pure vision analysis (images only)
+}
+
 #[derive(Debug, Serialize)]
 struct DetectRequest {
     lines: Vec<Line>,
@@ -160,8 +182,12 @@ fn FloorplanDetector() -> impl IntoView {
     let door_threshold = RwSignal::new(50.0);
     let coverage_threshold = RwSignal::new(0.3); // 30% minimum coverage for dividers
     let outer_boundary_ratio = RwSignal::new(1.5); // 1.5x area ratio for boundary filtering
-    let strategy = RwSignal::new(DetectionStrategy::HybridVision);
-    let input_type = RwSignal::new(InputType::Image); // Default to image for backward compatibility
+    let _strategy = RwSignal::new(DetectionStrategy::HybridVision); // Legacy - kept for compatibility
+    let input_type = RwSignal::new(Option::<InputType>::None); // Auto-detect from file
+    let svg_parser = RwSignal::new(SvgParser::Algorithmic); // Default parser
+    let image_vision = RwSignal::new(ImageVisionChoice::VisionWithSvg); // Default hybrid for images
+    let _vision_mode = RwSignal::new(VisionMode::None); // Legacy - kept for compatibility
+    let uploaded_filename = RwSignal::new(Option::<String>::None); // Track uploaded file
     let method_used = RwSignal::new(Option::<String>::None);
     let execution_time = RwSignal::new(Option::<u64>::None);
     let svg_content = RwSignal::new(Option::<String>::None); // Store SVG content
@@ -176,9 +202,23 @@ fn FloorplanDetector() -> impl IntoView {
                 if let Some(file) = files.get(0) {
                     let file_type = file.type_();
                     let file_name = file.name();
-                    let current_input_type = input_type.get();
 
-                    match current_input_type {
+                    // Auto-detect input type from file
+                    let detected_type = if file_name.ends_with(".json") || file_type == "application/json" {
+                        Some(InputType::Json)
+                    } else if file_name.ends_with(".svg") || file_type == "image/svg+xml" {
+                        Some(InputType::Svg)
+                    } else if file_type.starts_with("image/") {
+                        Some(InputType::Image)
+                    } else {
+                        error.set(Some("Unsupported file type. Please upload JSON, SVG, PNG, or JPG.".to_string()));
+                        return;
+                    };
+
+                    input_type.set(detected_type);
+                    uploaded_filename.set(Some(file_name.clone()));
+
+                    match detected_type.unwrap() {
                         InputType::Json => {
                             // Handle JSON file
                             if file_name.ends_with(".json") || file_type == "application/json" {
@@ -218,7 +258,9 @@ fn FloorplanDetector() -> impl IntoView {
     let reader = web_sys::FileReader::new().unwrap();
     let reader_clone = reader.clone();
 
-    let current_strategy = strategy.get();
+    // Get image processing choices
+    let current_image_vision = image_vision.get();
+    let current_svg_parser = svg_parser.get();
 
     let onload = Closure::wrap(Box::new(move |_event: web_sys::Event| {
         if let Ok(result) = reader_clone.result() {
@@ -234,9 +276,25 @@ fn FloorplanDetector() -> impl IntoView {
                             strategy: String,
                         }
 
+                        // Image: Map vision choice + parser choice to backend strategy (7 paths)
+                        let backend_strategy = match (current_image_vision, current_svg_parser) {
+                            // x) Vision only - no SVG parsing
+                            (ImageVisionChoice::VisionOnly, _) => "gpt5_only",
+
+                            // y1-y3) No vision + SVG parser choices
+                            (ImageVisionChoice::NoVision, SvgParser::Algorithmic) => "vtracer_only",
+                            (ImageVisionChoice::NoVision, SvgParser::Gpt5Nano) => "vtracer_ai_parser",
+                            (ImageVisionChoice::NoVision, SvgParser::Combined) => "vtracer_combined",
+
+                            // z1-z3) Vision + SVG parser choices
+                            (ImageVisionChoice::VisionWithSvg, SvgParser::Algorithmic) => "hybrid_vision",
+                            (ImageVisionChoice::VisionWithSvg, SvgParser::Gpt5Nano) => "hybrid_ai_parser",
+                            (ImageVisionChoice::VisionWithSvg, SvgParser::Combined) => "hybrid_combined",
+                        };
+
                         let request = VectorizeRequest {
                             image: base64_owned,
-                            strategy: current_strategy.as_str().to_string(),
+                            strategy: backend_strategy.to_string(),
                         };
 
                         match vectorize_blueprint(request).await {
@@ -326,8 +384,13 @@ fn FloorplanDetector() -> impl IntoView {
 
     // Handle detection
     let on_detect = move |_| {
-        let current_input_type = input_type.get();
-        let current_strategy = strategy.get();
+        let current_input_type = match input_type.get() {
+            Some(t) => t,
+            None => {
+                error.set(Some("Please upload a file first".to_string()));
+                return;
+            }
+        };
 
         // Validate input based on type
         match current_input_type {
@@ -371,18 +434,21 @@ fn FloorplanDetector() -> impl IntoView {
                     let current_coverage_threshold = coverage_threshold.get();
                     let current_outer_boundary_ratio = outer_boundary_ratio.get();
 
+                    // JSON: Always use GraphOnly (no vision)
+                    let backend_strategy = "graph_only".to_string();
+
                     let request = DetectRequest {
                         lines: current_lines,
                         area_threshold: current_area_threshold,
                         door_threshold: Some(current_door_threshold),
                         coverage_threshold: Some(current_coverage_threshold),
                         outer_boundary_ratio: Some(current_outer_boundary_ratio),
-                        strategy: current_strategy.as_str().to_string(),
-                        enable_vision: Some(current_strategy == DetectionStrategy::GraphWithVision),
-                        enable_yolo: Some(current_strategy == DetectionStrategy::YoloOnly),
+                        strategy: backend_strategy.clone(),
+                        enable_vision: Some(false),
+                        enable_yolo: Some(false),
                     };
 
-                    match detect_rooms(request, current_strategy).await {
+                    match detect_rooms(request, DetectionStrategy::GraphOnly).await {
                         Ok(response) => {
                             rooms.set(response.rooms);
                             method_used.set(response.method_used);
@@ -397,9 +463,18 @@ fn FloorplanDetector() -> impl IntoView {
                 }
                 InputType::Svg => {
                     let current_svg = svg_content.get().unwrap();
-                    let current_enable_vision = matches!(current_strategy, DetectionStrategy::SvgWithVision);
+                    let current_svg_parser = svg_parser.get();
 
-                    match detect_svg_rooms(current_svg, current_area_threshold, current_door_threshold, current_strategy, current_enable_vision).await {
+                    // SVG: Map parser choice to backend strategy
+                    let backend_strategy = match current_svg_parser {
+                        SvgParser::Algorithmic => DetectionStrategy::SvgOnly,
+                        SvgParser::Gpt5Nano => DetectionStrategy::SvgWithAiParser,
+                        SvgParser::Combined => DetectionStrategy::SvgWithAiParser, // TODO: Add Combined support to backend
+                    };
+
+                    let enable_vision = false; // SVG doesn't use vision in current architecture
+
+                    match detect_svg_rooms(current_svg, current_area_threshold, current_door_threshold, backend_strategy, enable_vision).await {
                         Ok(response) => {
                             rooms.set(response.rooms);
                             method_used.set(response.method_used);
@@ -438,249 +513,188 @@ fn FloorplanDetector() -> impl IntoView {
 </header>
 
             <div class="controls">
-                // Step 1: Choose Input Type
-                <div class="input-type-selector">
-                    <h3>"Step 1: Choose Input Type"</h3>
-                    <div class="input-type-options">
-                        <label class="input-type-option">
-                            <input
-                                type="radio"
-                                name="input-type"
-                                value="json"
-                                checked=move || matches!(input_type.get(), InputType::Json)
-                                on:change=move |_| {
-                                    input_type.set(InputType::Json);
-                                    strategy.set(DetectionStrategy::GraphOnly); // Default for JSON
-                                }
-                            />
-                            <div class="option-content">
-                                <strong>"JSON Lines"</strong>
-                                <p>"Upload pre-processed line data from floorplan parsing tools"</p>
-                                <small>"Best for: Custom parsers, existing line data"</small>
-                            </div>
-                        </label>
+                // Step 1: Upload File (auto-detects type)
+                <div class="file-upload-primary">
+                    <h3>"Step 1: Upload Your Floorplan"</h3>
+                    <input
+                        type="file"
+                        accept=".json,.svg,.png,.jpg,.jpeg"
+                        node_ref=file_input_ref
+                        on:change=on_file_change
+                    />
+                    <p class="file-info">
+                        "Supported formats: JSON (lines), SVG (vector), PNG/JPG (images)"
+                    </p>
 
-                        <label class="input-type-option">
-                            <input
-                                type="radio"
-                                name="input-type"
-                                value="image"
-                                checked=move || matches!(input_type.get(), InputType::Image)
-                                on:change=move |_| {
-                                    input_type.set(InputType::Image);
-                                    strategy.set(DetectionStrategy::HybridVision); // Default for images
-                                }
-                            />
-                            <div class="option-content">
-                                <strong>"Blueprint Image"</strong>
-                                <p>"Upload scanned blueprints (PNG/JPG) for AI processing"</p>
-                                <small>"Best for: Scanned documents, photos of floorplans"</small>
-                            </div>
-                        </label>
-
-                        <label class="input-type-option">
-                            <input
-                                type="radio"
-                                name="input-type"
-                                value="svg"
-                                checked=move || matches!(input_type.get(), InputType::Svg)
-                                on:change=move |_| {
-                                    input_type.set(InputType::Svg);
-                                    strategy.set(DetectionStrategy::SvgOnly); // Default for SVG
-                                }
-                            />
-                            <div class="option-content">
-                                <strong>"Vector SVG"</strong>
-                                <p>"Upload clean vector floorplans (SVG format)"</p>
-                                <small>"Best for: CAD exports, vector drawings, fast processing"</small>
-                            </div>
-                        </label>
-                    </div>
-                </div>
-
-                // Step 2: Choose Detection Strategy
-                <div class="strategy-selector">
-                    <h3>"Step 2: Choose Detection Method"</h3>
-                    <div class="strategy-options">
-                         {move || {
-                             let current_input = input_type.get();
-                             match current_input {
-                                 InputType::Json => view! {
-                                     <div class="strategy-group">
-                                         <h4>"JSON-Based Detection"</h4>
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="Simple"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::Simple)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::Simple)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"Simple Divider Detection"</strong>
-                                                 <p>"Fast geometric analysis for rectangular layouts with vertical dividers"</p>
-                                                 <small>"⚡ Fast (~1ms) • 📐 Basic accuracy"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="GraphOnly"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::GraphOnly)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::GraphOnly)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"Graph Cycle Detection"</strong>
-                                                 <p>"Advanced geometric analysis for complex polygons (L-shapes, pentagons)"</p>
-                                                 <small>"🔍 Accurate • 🕐 Fast (~10ms)"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="GraphWithVision"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::GraphWithVision)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::GraphWithVision)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"Graph + AI Classification"</strong>
-                                                 <p>"Geometric detection enhanced with AI room type classification"</p>
-                                                 <small>"🎯 High accuracy • ⏱️ Slower (~54s)"</small>
-                                             </div>
-                                         </label>
-                                     </div>
-                                 }.into_any(),
-                                 InputType::Image => view! {
-                                     <div class="strategy-group">
-                                         <h4>"Image-Based Detection"</h4>
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="HybridVision"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::HybridVision)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::HybridVision)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"Hybrid Vision Pipeline"</strong>
-                                                 <p>"VTracer vectorization + AI vision for comprehensive blueprint analysis"</p>
-                                                 <small>"🎯 Best accuracy • ⏱️ Moderate time (~2-3min)"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="VTracerOnly"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::VTracerOnly)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::VTracerOnly)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"VTracer Vectorization"</strong>
-                                                 <p>"Pure geometric vectorization without AI classification"</p>
-                                                 <small>"⚡ Fast • 📐 Geometric only"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="Gpt5Only"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::Gpt5Only)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::Gpt5Only)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"AI Vision Analysis"</strong>
-                                                 <p>"Pure AI-based blueprint interpretation and room detection"</p>
-                                                 <small>"🧠 AI-powered • ⏱️ Slower (~1-2min)"</small>
-                                             </div>
-                                         </label>
-                                     </div>
-                                 }.into_any(),
-                                 InputType::Svg => view! {
-                                     <div class="strategy-group">
-                                         <h4>"SVG-Based Detection"</h4>
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="SvgOnly"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::SvgOnly)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::SvgOnly)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"Direct SVG Parsing"</strong>
-                                                 <p>"Algorithmic parsing of SVG elements - no AI required"</p>
-                                                 <small>"⚡ Fastest (~1ms) • 📐 Geometric accuracy"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="SvgWithVision"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::SvgWithVision)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::SvgWithVision)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"SVG + AI Classification"</strong>
-                                                 <p>"SVG parsing enhanced with AI room type identification"</p>
-                                                 <small>"🎯 High accuracy • ⏱️ Moderate (~30s)"</small>
-                                             </div>
-                                         </label>
-
-                                         <label class="strategy-option">
-                                             <input
-                                                 type="radio"
-                                                 name="strategy"
-                                                 value="SvgWithAiParser"
-                                                 checked=move || matches!(strategy.get(), DetectionStrategy::SvgWithAiParser)
-                                                 on:change=move |_| strategy.set(DetectionStrategy::SvgWithAiParser)
-                                             />
-                                             <div class="option-content">
-                                                 <strong>"AI SVG Interpreter"</strong>
-                                                 <p>"Use AI models to interpret SVG instead of geometric parsing"</p>
-                                                 <small>"🧠 AI understanding • ⏱️ Variable time"</small>
-                                             </div>
-                                         </label>
-                                     </div>
-                                 }.into_any(),
-                             }
-                         }}
-                    </div>
-                </div>
-
-                // File Upload Section
-                <div class="file-upload">
-                    {move || {
-                        let current_input = input_type.get();
-                        let accept_types = match current_input {
-                            InputType::Json => ".json",
-                            InputType::Image => ".png,.jpg,.jpeg",
-                            InputType::Svg => ".svg",
-                        };
-                        let label_text = match current_input {
-                            InputType::Json => "Upload JSON Lines File:",
-                            InputType::Image => "Upload Blueprint Image (PNG/JPG):",
-                            InputType::Svg => "Upload SVG Floorplan:",
-                        };
-
+                    {move || uploaded_filename.get().map(|filename| {
                         view! {
-                            <label for="file-input">{label_text}</label>
-                            <input
-                                type="file"
-                                id="file-input"
-                                accept=accept_types
-                                node_ref=file_input_ref
-                                on:change=on_file_change
-                            />
+                            <div class="upload-success">
+                                <strong>"✓ Uploaded: "</strong> {filename}
+                                <br/>
+                                <small>{
+                                    match input_type.get() {
+                                        Some(InputType::Json) => "Type: JSON Lines",
+                                        Some(InputType::Image) => "Type: Blueprint Image",
+                                        Some(InputType::Svg) => "Type: Vector SVG",
+                                        None => "",
+                                    }
+                                }</small>
+                            </div>
+                        }
+                    })}
+                </div>
+
+                // Step 2: Conditional Strategy Selection Based on File Type
+                <div class="strategy-selector">
+                    {move || {
+                        match input_type.get() {
+                            None => view! {
+                                <p class="placeholder">"Upload a file to see detection options"</p>
+                            }.into_any(),
+
+                            Some(InputType::Json) => view! {
+                                <div class="info-message">
+                                    <p>"✓ JSON file detected - using GraphOnly strategy"</p>
+                                    <small>"Graph cycle detection with geometric analysis"</small>
+                                </div>
+                            }.into_any(),
+                            Some(InputType::Image) => view! {
+                                <div class="image-strategy">
+                                    <h3>"Step 2a: Vision Enhancement"</h3>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="vision-choice"
+                                            checked=move || matches!(image_vision.get(), ImageVisionChoice::NoVision)
+                                            on:change=move |_| image_vision.set(ImageVisionChoice::NoVision)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"No Vision (y)"</strong>
+                                            <p>"Vectorize only, then parse SVG"</p>
+                                            <small>"⚡ Fast • 📐 Geometric only"</small>
+                                        </div>
+                                    </label>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="vision-choice"
+                                            checked=move || matches!(image_vision.get(), ImageVisionChoice::VisionOnly)
+                                            on:change=move |_| image_vision.set(ImageVisionChoice::VisionOnly)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"Vision Only (x)"</strong>
+                                            <p>"Pure AI, skip SVG vectorization"</p>
+                                            <small>"🧠 AI-powered • ⏱️ Slower (~1-2min)"</small>
+                                        </div>
+                                    </label>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="vision-choice"
+                                            checked=move || matches!(image_vision.get(), ImageVisionChoice::VisionWithSvg)
+                                            on:change=move |_| image_vision.set(ImageVisionChoice::VisionWithSvg)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"Vision + SVG Parsing (z)"</strong>
+                                            <p>"Hybrid: vectorize, parse, and merge with AI vision"</p>
+                                            <small>"🎯 Best accuracy • ⏱️ Moderate (~15-20s)"</small>
+                                        </div>
+                                    </label>
+
+                                    // Step 2b: SVG parser choice (hidden if VisionOnly)
+                                    {move || {
+                                        if !matches!(image_vision.get(), ImageVisionChoice::VisionOnly) {
+                                            view! {
+                                                <div class="svg-parser-choice">
+                                                    <h3>"Step 2b: Choose SVG Parser"</h3>
+                                                    <label class="strategy-option">
+                                                        <input
+                                                            type="radio"
+                                                            name="svg-parser"
+                                                            checked=move || matches!(svg_parser.get(), SvgParser::Algorithmic)
+                                                            on:change=move |_| svg_parser.set(SvgParser::Algorithmic)
+                                                        />
+                                                        <div class="option-content">
+                                                            <strong>"a) Algorithmic"</strong>
+                                                            <small>"Fast geometric parsing"</small>
+                                                        </div>
+                                                    </label>
+                                                    <label class="strategy-option">
+                                                        <input
+                                                            type="radio"
+                                                            name="svg-parser"
+                                                            checked=move || matches!(svg_parser.get(), SvgParser::Gpt5Nano)
+                                                            on:change=move |_| svg_parser.set(SvgParser::Gpt5Nano)
+                                                        />
+                                                        <div class="option-content">
+                                                            <strong>"b) AI Parser"</strong>
+                                                            <small>"AI text interpretation"</small>
+                                                        </div>
+                                                    </label>
+                                                    <label class="strategy-option">
+                                                        <input
+                                                            type="radio"
+                                                            name="svg-parser"
+                                                            checked=move || matches!(svg_parser.get(), SvgParser::Combined)
+                                                            on:change=move |_| svg_parser.set(SvgParser::Combined)
+                                                        />
+                                                        <div class="option-content">
+                                                            <strong>"c) Combined"</strong>
+                                                            <small>"Run both and compare"</small>
+                                                        </div>
+                                                    </label>
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            view! {}.into_any()
+                                        }
+                                    }}
+                                </div>
+                            }.into_any(),
+                            Some(InputType::Svg) => view! {
+                                <div class="svg-parser-choice">
+                                    <h3>"Step 2: Choose SVG Parser"</h3>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="svg-parser"
+                                            checked=move || matches!(svg_parser.get(), SvgParser::Algorithmic)
+                                            on:change=move |_| svg_parser.set(SvgParser::Algorithmic)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"a) Algorithmic Parser"</strong>
+                                            <p>"Fast geometric parsing of SVG elements"</p>
+                                            <small>"⚡ Fastest (~1ms) • 📐 Geometric accuracy"</small>
+                                        </div>
+                                    </label>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="svg-parser"
+                                            checked=move || matches!(svg_parser.get(), SvgParser::Gpt5Nano)
+                                            on:change=move |_| svg_parser.set(SvgParser::Gpt5Nano)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"b) AI Parser (GPT-5 Nano)"</strong>
+                                            <p>"AI text model interprets SVG markup"</p>
+                                            <small>"🧠 AI understanding • ⏱️ Variable time"</small>
+                                        </div>
+                                    </label>
+                                    <label class="strategy-option">
+                                        <input
+                                            type="radio"
+                                            name="svg-parser"
+                                            checked=move || matches!(svg_parser.get(), SvgParser::Combined)
+                                            on:change=move |_| svg_parser.set(SvgParser::Combined)
+                                        />
+                                        <div class="option-content">
+                                            <strong>"c) Combined Parser"</strong>
+                                            <p>"Run both parsers and compare results"</p>
+                                            <small>"🔬 Validation • ⏱️ 2x time"</small>
+                                        </div>
+                                    </label>
+                                </div>
+                            }.into_any(),
                         }
                     }}
                 </div>
@@ -759,9 +773,10 @@ fn FloorplanDetector() -> impl IntoView {
                      on:click=on_detect
                      disabled=move || {
                          loading.get() || match input_type.get() {
-                             InputType::Json => lines.get().is_empty(),
-                             InputType::Image => rooms.get().is_empty(), // Images are processed on upload
-                             InputType::Svg => svg_content.get().is_none(),
+                             None => true, // No file uploaded
+                             Some(InputType::Json) => lines.get().is_empty(),
+                             Some(InputType::Image) => rooms.get().is_empty(), // Images are processed on upload
+                             Some(InputType::Svg) => svg_content.get().is_none(),
                          }
                      }
                  >
@@ -770,9 +785,10 @@ fn FloorplanDetector() -> impl IntoView {
                              "Processing..."
                          } else {
                              match input_type.get() {
-                                 InputType::Json => "Detect Rooms",
-                                 InputType::Image => "Rooms Detected",
-                                 InputType::Svg => "Detect Rooms from SVG",
+                                 None => "Upload a file to begin",
+                                 Some(InputType::Json) => "Detect Rooms",
+                                 Some(InputType::Image) => "Rooms Detected",
+                                 Some(InputType::Svg) => "Detect Rooms from SVG",
                              }
                          }
                      }}
@@ -788,7 +804,10 @@ fn FloorplanDetector() -> impl IntoView {
 
              <div class="stats">
                  {move || match input_type.get() {
-                     InputType::Json => view! {
+                     None => view! {
+                         <p>"Upload a file to see stats"</p>
+                     }.into_any(),
+                     Some(InputType::Json) => view! {
                          <>
                              <p>"Lines: " {move || lines.get().len()}</p>
                              <p>"Rooms Detected: " {move || rooms.get().len()}</p>
@@ -800,7 +819,7 @@ fn FloorplanDetector() -> impl IntoView {
                              })}
                          </>
                      }.into_any(),
-                     InputType::Image => view! {
+                     Some(InputType::Image) => view! {
                          <>
                              <p>"Lines: " {move || lines.get().len()}</p>
                              <p>"Rooms Detected: " {move || rooms.get().len()}</p>
@@ -812,7 +831,7 @@ fn FloorplanDetector() -> impl IntoView {
                              })}
                          </>
                      }.into_any(),
-                     InputType::Svg => view! {
+                     Some(InputType::Svg) => view! {
                          <>
                              <p>"Lines: " {0}</p>
                              <p>"Rooms Detected: " {move || rooms.get().len()}</p>
