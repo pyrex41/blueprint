@@ -21,18 +21,20 @@ pub fn render_floorplan(canvas: &HtmlCanvasElement, lines: &[Line], rooms: &[Roo
     context.set_fill_style(&"white".into());
     context.fill_rect(0.0, 0.0, width, height);
 
-    if lines.is_empty() {
-        // Show placeholder text
+    // Calculate bounds for scaling from lines or rooms
+    let bounds = if !lines.is_empty() {
+        calculate_bounds_from_lines(lines)
+    } else if !rooms.is_empty() {
+        calculate_bounds_from_rooms(rooms)
+    } else {
+        // Show placeholder text if no data
         context.set_fill_style(&"#999".into());
         context.set_font("20px sans-serif");
         context
             .fill_text("Upload a JSON file to see the floorplan", 200.0, height / 2.0)
             .unwrap();
         return;
-    }
-
-    // Calculate bounds for scaling
-    let bounds = calculate_bounds(lines);
+    };
 
     // Calculate scale to fit canvas with padding
     let padding = 50.0;
@@ -47,6 +49,7 @@ pub fn render_floorplan(canvas: &HtmlCanvasElement, lines: &[Line], rooms: &[Roo
         context.begin_path();
 
         if !room.points.is_empty() {
+            // Use polygon points if available
             let first = transform_point(&room.points[0], &bounds, scale, width, height, padding);
             context.move_to(first.0, first.1);
 
@@ -57,6 +60,17 @@ pub fn render_floorplan(canvas: &HtmlCanvasElement, lines: &[Line], rooms: &[Roo
 
             context.close_path();
             context.fill();
+        } else if room.bounding_box.len() >= 4 {
+            // Fall back to bounding box if no points available
+            let min_x = room.bounding_box[0];
+            let min_y = room.bounding_box[1];
+            let max_x = room.bounding_box[2];
+            let max_y = room.bounding_box[3];
+
+            let (x1, y1) = transform_point(&Point { x: min_x, y: min_y }, &bounds, scale, width, height, padding);
+            let (x2, y2) = transform_point(&Point { x: max_x, y: max_y }, &bounds, scale, width, height, padding);
+
+            context.fill_rect(x1, y2, x2 - x1, y1 - y2);
         }
         context.set_global_alpha(1.0);
     }
@@ -82,7 +96,7 @@ pub fn render_floorplan(canvas: &HtmlCanvasElement, lines: &[Line], rooms: &[Roo
     context.set_font("14px sans-serif");
 
     for room in rooms {
-        if !room.points.is_empty() {
+        if room.bounding_box.len() >= 4 {
             // Calculate center of bounding box
             let center_x = (room.bounding_box[0] + room.bounding_box[2]) / 2.0;
             let center_y = (room.bounding_box[1] + room.bounding_box[3]) / 2.0;
@@ -102,7 +116,7 @@ pub fn render_floorplan(canvas: &HtmlCanvasElement, lines: &[Line], rooms: &[Roo
 }
 
 /// Calculate the bounding box of all lines
-fn calculate_bounds(lines: &[Line]) -> Bounds {
+fn calculate_bounds_from_lines(lines: &[Line]) -> Bounds {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
@@ -113,6 +127,39 @@ fn calculate_bounds(lines: &[Line]) -> Bounds {
         min_y = min_y.min(line.start.y).min(line.end.y);
         max_x = max_x.max(line.start.x).max(line.end.x);
         max_y = max_y.max(line.start.y).max(line.end.y);
+    }
+
+    Bounds {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    }
+}
+
+/// Calculate the bounding box of all rooms
+fn calculate_bounds_from_rooms(rooms: &[Room]) -> Bounds {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for room in rooms {
+        if !room.points.is_empty() {
+            // Use polygon points if available
+            for point in &room.points {
+                min_x = min_x.min(point.x);
+                min_y = min_y.min(point.y);
+                max_x = max_x.max(point.x);
+                max_y = max_y.max(point.y);
+            }
+        } else if room.bounding_box.len() >= 4 {
+            // Use bounding box if no points available
+            min_x = min_x.min(room.bounding_box[0]);
+            min_y = min_y.min(room.bounding_box[1]);
+            max_x = max_x.max(room.bounding_box[2]);
+            max_y = max_y.max(room.bounding_box[3]);
+        }
     }
 
     Bounds {

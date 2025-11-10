@@ -471,10 +471,6 @@ impl DetectorOrchestrator {
 
         let image_bytes = image_bytes.unwrap();
 
-        // Step 0: Check API key first (fail fast before expensive operations)
-        std::env::var("OPENAI_API_KEY")
-            .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
-
         // Step 1: Normalize image
         let norm_start = Instant::now();
         let normalized_image = crate::image_preprocessor::NormalizedImage::from_bytes(image_bytes)
@@ -484,208 +480,74 @@ impl DetectorOrchestrator {
         timings.push(("image_normalization".to_string(), norm_elapsed));
         info!("Image normalized in {}ms", norm_elapsed);
 
-        // Step 2: Run VTracer and GPT-5 Vision in parallel
+        // Step 2: Run VTracer
         let vtracer_start = Instant::now();
-        let gpt5_start = Instant::now();
 
-        // VTracer vectorization
-        let vtracer_future = async {
-            let vtracer_start = Instant::now();
+        // VTracer requires file paths, use UUID for unique temp file names
+        let request_id = uuid::Uuid::new_v4();
+        let temp_path = std::env::temp_dir().join(format!("hybrid_{}_input.png", request_id));
+        let svg_path = std::env::temp_dir().join(format!("hybrid_{}_output.svg", request_id));
 
-            // VTracer requires file paths, use UUID for unique temp file names (prevents race conditions)
-            let request_id = uuid::Uuid::new_v4();
-            let temp_path = std::env::temp_dir().join(format!("hybrid_{}_input.png", request_id));
-            let svg_path = std::env::temp_dir().join(format!("hybrid_{}_output.svg", request_id));
+    // Preprocess image for VTracer
+    let preprocessed_bytes = normalized_image.preprocess_for_vtracer()?;
 
-// Preprocess image for VTracer
-let preprocessed_bytes = normalized_image.preprocess_for_vtracer()?;
+    // Save preprocessed image to temp file
+    std::fs::write(&temp_path, &preprocessed_bytes)?;
 
-// Save preprocessed image to temp file
-std::fs::write(&temp_path, &preprocessed_bytes)?;
-
-            // Configure VTracer
-            let config = vtracer::Config {
-                color_mode: vtracer::ColorMode::Binary,
-                hierarchical: vtracer::Hierarchical::Stacked,
-                mode: visioncortex::PathSimplifyMode::Spline,
-                filter_speckle: 4,
-                color_precision: 6,
-                layer_difference: 16,
-                corner_threshold: 60,
-                length_threshold: 4.0,
-                max_iterations: 10,
-                splice_threshold: 45,
-                path_precision: Some(3),
-            };
-
-            // Convert to SVG
-            let vtracer_result = vtracer::convert_image_to_svg(&temp_path, &svg_path, config)
-                .map_err(|e| anyhow::anyhow!("VTracer failed: {}", e));
-
-            // Read SVG (only if vtracer succeeded)
-            let svg_result = vtracer_result.and_then(|_| {
-                std::fs::read_to_string(&svg_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read SVG: {}", e))
-            });
-
-            // Always clean up temp files, logging failures
-            if let Err(e) = std::fs::remove_file(&temp_path) {
-                warn!("Failed to remove temp input file {}: {}", temp_path.display(), e);
-            }
-            if let Err(e) = std::fs::remove_file(&svg_path) {
-                warn!("Failed to remove temp SVG file {}: {}", svg_path.display(), e);
-            }
-
-            // Return SVG processing result
-            let svg = svg_result?;
-
-            let vectorizer_lines = crate::image_vectorizer::parse_svg_to_lines(&svg)?;
-
-            // Convert image_vectorizer::Line to crate::Line
-            let lines: Vec<Line> = vectorizer_lines.iter().map(|vl| Line {
-                start: crate::Point { x: vl.start.x, y: vl.start.y },
-                end: crate::Point { x: vl.end.x, y: vl.end.y },
-                is_load_bearing: vl.is_load_bearing,
-            }).collect();
-
-            let elapsed = vtracer_start.elapsed().as_millis();
-            Ok::<(Vec<Line>, u128), anyhow::Error>((lines, elapsed))
+        // Configure VTracer for blueprint detection
+        let config = vtracer::Config {
+            color_mode: vtracer::ColorMode::Color,  // Color mode works better with grayscale images
+            hierarchical: vtracer::Hierarchical::Stacked,
+            mode: visioncortex::PathSimplifyMode::Spline,
+            filter_speckle: 4,  // Moderate speckle filtering
+            color_precision: 8,  // Higher precision for grayscale tones
+            layer_difference: 5,  // Lower for grayscale images
+            corner_threshold: 60,  // Prefer straight lines for architectural drawings
+            length_threshold: 4.0,  // Capture meaningful line segments
+            max_iterations: 10,
+            splice_threshold: 45,
+            path_precision: Some(3),
         };
 
-        // GPT-5 Vision wall extraction
-        let gpt5_future = async {
-            let gpt5_start = Instant::now();
+        // Convert to SVG
+        vtracer::convert_image_to_svg(&temp_path, &svg_path, config)
+            .map_err(|e| anyhow::anyhow!("VTracer failed: {}", e))?;
 
-            // Check for OpenAI API key
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .map_err(|_| anyhow::anyhow!("OPENAI_API_KEY not set"))?;
+        // Read SVG
+        let svg = std::fs::read_to_string(&svg_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read SVG: {}", e))?;
 
-            let classifier = vision_classifier::VisionClassifier::new(api_key, Some(self.config.vision_model.clone()));
+        // Clean up temp files
+        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(&svg_path);
 
-            let wall_data = classifier
-                .extract_wall_segments(&normalized_image.base64_data)
-                .await?;
+        // Parse SVG to lines
+        let vectorizer_lines = crate::image_vectorizer::parse_svg_to_lines(&svg)?;
 
-            let elapsed = gpt5_start.elapsed().as_millis();
-            Ok::<(vision_classifier::VisionWallData, u128), anyhow::Error>((wall_data, elapsed))
-        };
+        // Convert to crate::Line
+        let lines: Vec<Line> = vectorizer_lines.iter().map(|vl| Line {
+            start: crate::Point { x: vl.start.x, y: vl.start.y },
+            end: crate::Point { x: vl.end.x, y: vl.end.y },
+            is_load_bearing: false,
+        }).collect();
 
-        // Run both in parallel
-        let (vtracer_result, gpt5_result) = tokio::join!(vtracer_future, gpt5_future);
-
-        let (vtracer_lines, vtracer_elapsed) = vtracer_result?;
-        let (vision_data, gpt5_elapsed) = gpt5_result?;
-
+        let vtracer_elapsed = vtracer_start.elapsed().as_millis();
         timings.push(("vtracer_vectorization".to_string(), vtracer_elapsed));
-        timings.push(("gpt5_wall_extraction".to_string(), gpt5_elapsed));
+        info!("VTracer extracted {} lines in {}ms from preprocessed image", lines.len(), vtracer_elapsed);
 
-        info!(
-            "VTracer found {} walls in {}ms, GPT-5 found {} walls in {}ms",
-            vtracer_lines.len(),
-            vtracer_elapsed,
-            vision_data.walls.len(),
-            gpt5_elapsed
-        );
-
-        // Step 3: Convert GPT-5 walls to Line format (denormalize coordinates)
-        let vision_lines: Vec<Line> = vision_data
-            .walls
-            .iter()
-            .map(|wall| {
-                let start_orig = normalized_image.denormalize_point(
-                    crate::image_preprocessor::NormalizedPoint {
-                        x: wall.start.x,
-                        y: wall.start.y,
-                    },
-                );
-                let end_orig = normalized_image.denormalize_point(
-                    crate::image_preprocessor::NormalizedPoint {
-                        x: wall.end.x,
-                        y: wall.end.y,
-                    },
-                );
-
-                Line {
-                    start: crate::Point {
-                        x: start_orig.x,
-                        y: start_orig.y,
-                    },
-                    end: crate::Point {
-                        x: end_orig.x,
-                        y: end_orig.y,
-                    },
-                    is_load_bearing: false,
-                }
-            })
-            .collect();
-
-        // Step 4: Merge wall segments using confidence-based strategy
-        let merge_start = Instant::now();
-
-        // Convert to wall_merger format
-        let vtracer_walls_for_merge: Vec<crate::wall_merger::Line> = vtracer_lines
-            .iter()
-            .map(|l| crate::wall_merger::Line {
-                start: crate::wall_merger::Point { x: l.start.x, y: l.start.y },
-                end: crate::wall_merger::Point { x: l.end.x, y: l.end.y },
-                is_load_bearing: l.is_load_bearing,
-                source: None,
-            })
-            .collect();
-
-        let vision_walls_for_merge: Vec<crate::wall_merger::Line> = vision_lines
-            .iter()
-            .map(|l| crate::wall_merger::Line {
-                start: crate::wall_merger::Point { x: l.start.x, y: l.start.y },
-                end: crate::wall_merger::Point { x: l.end.x, y: l.end.y },
-                is_load_bearing: l.is_load_bearing,
-                source: None,
-            })
-            .collect();
-
-        let merge_result = crate::wall_merger::merge_wall_segments(
-            vtracer_walls_for_merge,
-            vision_walls_for_merge,
-            vision_data.confidence,
-            self.config.confidence_threshold,
-        );
-
-        let merge_elapsed = merge_start.elapsed().as_millis();
-        timings.push(("wall_merging".to_string(), merge_elapsed));
-
-        info!(
-            "Merged {} walls using {} strategy ({} consensus) in {}ms",
-            merge_result.metadata.merged_count,
-            merge_result.metadata.strategy_used,
-            merge_result.metadata.consensus_count,
-            merge_elapsed
-        );
-
-        // Step 5: Convert merged walls back to our Line format
-        let merged_lines: Vec<Line> = merge_result
-            .walls
-            .iter()
-            .map(|wall| Line {
-                start: crate::Point {
-                    x: wall.start.x,
-                    y: wall.start.y,
-                },
-                end: crate::Point {
-                    x: wall.end.x,
-                    y: wall.end.y,
-                },
-                is_load_bearing: wall.is_load_bearing,
-            })
-            .collect();
-
-        // Step 6: Detect rooms from merged walls
-        let detection_start = Instant::now();
-
+        // Step 3: Build graph from extracted lines
+        let graph_start = Instant::now();
         let graph = crate::graph_builder::build_graph_with_door_threshold(
-            &merged_lines,
+            &lines,
             self.config.door_threshold,
         );
 
+        let graph_elapsed = graph_start.elapsed().as_millis();
+        timings.push(("graph_building".to_string(), graph_elapsed));
+        info!("Graph built in {}ms", graph_elapsed);
+
+        // Step 4: Detect rooms
+        let detection_start = Instant::now();
         let rooms = crate::room_detector::detect_rooms(
             &graph,
             self.config.area_threshold,
@@ -694,38 +556,17 @@ std::fs::write(&temp_path, &preprocessed_bytes)?;
 
         let detection_elapsed = detection_start.elapsed().as_millis();
         timings.push(("room_detection".to_string(), detection_elapsed));
-
         info!("Detected {} rooms in {}ms", rooms.len(), detection_elapsed);
 
-        // Step 7: Enhance rooms with GPT-5 room labels
-        let mut enhanced_rooms: Vec<EnhancedRoom> = rooms
+        // Convert to EnhancedRoom format (without vision classification)
+        let enhanced_rooms: Vec<EnhancedRoom> = rooms
             .into_iter()
-            .map(|room| {
-                // Try to match with GPT-5 room labels based on bounding box center
-                let room_center_x = (room.bounding_box[0] + room.bounding_box[2]) / 2.0;
-                let room_center_y = (room.bounding_box[1] + room.bounding_box[3]) / 2.0;
-
-                // Find closest room label
-                let closest_label = vision_data
-                    .rooms
-                    .iter()
-                    .min_by_key(|label| {
-                        let dx = label.center.x - room_center_x;
-                        let dy = label.center.y - room_center_y;
-                        ((dx * dx + dy * dy).sqrt() * 1000.0) as i64
-                    });
-
-                EnhancedRoom {
-                    room,
-                    room_type: closest_label.map(|l| l.room_type.clone()),
-                    confidence: if closest_label.is_some() {
-                        Some(vision_data.confidence)
-                    } else {
-                        None
-                    },
-                    features: Vec::new(),
-                    detection_method: "hybrid_vision".to_string(),
-                }
+            .map(|room| EnhancedRoom {
+                room,
+                room_type: None,
+                confidence: None,
+                features: Vec::new(),
+                detection_method: "hybrid_vision".to_string(),
             })
             .collect();
 
@@ -735,20 +576,17 @@ std::fs::write(&temp_path, &preprocessed_bytes)?;
             execution_time_ms: 0, // Will be set by caller
             metadata: DetectionMetadata {
                 graph_based_rooms: enhanced_rooms.len(),
-                vision_classified: enhanced_rooms
-                    .iter()
-                    .filter(|r| r.room_type.is_some())
-                    .count(),
+                vision_classified: 0,
                 yolo_detected: 0,
                 total_execution_time_ms: 0, // Will be set by caller
                 method_timings: timings.clone(),
-                vtracer_walls_count: Some(merge_result.metadata.vtracer_count),
-                gpt5_walls_count: Some(merge_result.metadata.gpt5_count),
-                merged_walls_count: Some(merge_result.metadata.merged_count),
-                consensus_walls_count: Some(merge_result.metadata.consensus_count),
-                gpt5_confidence: Some(vision_data.confidence),
-                merge_strategy: Some(merge_result.metadata.strategy_used.clone()),
-                merged_walls: Some(merge_result.walls),
+                vtracer_walls_count: Some(lines.len()),
+                gpt5_walls_count: None,
+                merged_walls_count: None,
+                consensus_walls_count: None,
+                gpt5_confidence: None,
+                merge_strategy: None,
+                merged_walls: None,
             },
         })
     }
@@ -792,19 +630,19 @@ let preprocessed_bytes = normalized_image.preprocess_for_vtracer()
 std::fs::write(&temp_path, &preprocessed_bytes)?;
 
         // Configure VTracer for blueprint detection
-        // Use Color mode instead of Binary to handle colored/grayscale blueprints
+        // Use Color mode to handle grayscale blueprint images
         let config = vtracer::Config {
-            color_mode: vtracer::ColorMode::Binary,  // Switch to Binary for better line extraction from blueprints
+            color_mode: vtracer::ColorMode::Color,  // Color mode works better with grayscale images
             hierarchical: vtracer::Hierarchical::Stacked,
-            mode: visioncortex::PathSimplifyMode::Spline,
-            filter_speckle: 2,  // Reduce to capture more lines, less filtering
-            color_precision: 4,  // Reduced for better grouping of similar colors
-            layer_difference: 8,  // Reduced for better edge detection
-            corner_threshold: 50,  // Lower for more detailed corner detection
-            length_threshold: 2.0,  // Lower to include shorter line segments
-            max_iterations: 15,  // Increased for better convergence
-            splice_threshold: 30,  // Lower for more aggressive line splicing
-            path_precision: Some(2),  // Reduced for simpler paths
+        mode: visioncortex::PathSimplifyMode::Spline,
+        filter_speckle: 4,  // Moderate speckle filtering
+        color_precision: 8,  // Higher precision for grayscale tones
+        layer_difference: 5,  // Lower for grayscale images
+        corner_threshold: 60,  // Prefer straight lines for architectural drawings
+        length_threshold: 4.0,  // Capture meaningful line segments
+        max_iterations: 10,
+        splice_threshold: 45,
+        path_precision: Some(3),
         };
 
         // Convert to SVG

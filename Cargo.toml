@@ -9,6 +9,8 @@ members = [
     "test-floorplan",
     "vision-classifier",
     "unified-detector",
+    "vtracer-test",
+    "room-detection-rust",
 ]
 [workspace.package]
 version = "0.1.0"

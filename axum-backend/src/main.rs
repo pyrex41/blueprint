@@ -11,6 +11,9 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
+use std::process::{Command, Stdio};
+use std::io::Write;
+use std::time::Instant;
 
 mod graph_builder;
 mod room_detector;
@@ -18,9 +21,14 @@ mod detector_orchestrator;
 mod image_vectorizer;
 mod image_preprocessor;
 mod wall_merger;
+mod connected_components;
+mod vector_graph;
+mod new_algorithms;
 
 use graph_builder::*;
 use room_detector::{detect_rooms, detect_rooms_simple};
+use new_algorithms::detect_rust_floodfill_handler;
+use vector_graph::detect_vector_graph_handler;
 
 // Security limits to prevent DoS attacks
 const MAX_LINES: usize = 10_000;
@@ -234,6 +242,92 @@ async fn detect_rooms_simple_handler(
 }
 
 async fn detect_rooms_handler(
+    Json(request): Json<DetectRoomsRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received detection request with {} lines", request.lines.len());
+
+    // Validate input size to prevent DoS
+    if request.lines.len() > MAX_LINES {
+        warn!(
+            "Request rejected: too many lines ({} > {})",
+            request.lines.len(),
+            MAX_LINES
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INPUT_TOO_LARGE".to_string(),
+                message: format!(
+                    "Too many lines. Maximum allowed: {}. Received: {}",
+                    MAX_LINES,
+                    request.lines.len()
+                ),
+            }),
+        ));
+    }
+
+    if request.lines.is_empty() {
+        warn!("Empty lines input");
+        return Ok(Json(DetectRoomsResponse {
+            rooms: vec![],
+            total_rooms: 0,
+        }));
+    }
+
+    // Validate area threshold
+    if !request.area_threshold.is_finite() || request.area_threshold < 0.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "INVALID_THRESHOLD".to_string(),
+                message: "Area threshold must be a positive finite number".to_string(),
+            }),
+        ));
+    }
+
+    // Validate all points
+    for (idx, line) in request.lines.iter().enumerate() {
+        if !line.start.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid start point in line {}", idx),
+                }),
+            ));
+        }
+        if !line.end.is_valid() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_POINT".to_string(),
+                    message: format!("Invalid end point in line {}", idx),
+                }),
+            ));
+        }
+    }
+
+    // For JSON input, always use GraphOnly (cycle detection) - the algorithm that works
+    let graph = if request.door_threshold > 0.0 {
+        info!("Building graph with door threshold: {}", request.door_threshold);
+        graph_builder::build_graph_with_door_threshold(&request.lines, request.door_threshold)
+    } else {
+        graph_builder::build_graph(&request.lines)
+    };
+
+    info!("Built graph with {} nodes and {} edges", graph.node_count(), graph.edge_count());
+
+    // Detect rooms using cycle detection (the working algorithm from room-detection-rust)
+    let rooms = room_detector::detect_rooms(&graph, request.area_threshold, 1.5);
+    info!("Detected {} rooms using GraphOnly cycle detection", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
+}
+
+async fn detect_rooms_handler_old(
     Json(request): Json<DetectRoomsRequest>,
 ) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!("Received detection request with {} lines", request.lines.len());
@@ -800,12 +894,334 @@ async fn vectorize_blueprint_handler(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct ImageDetectRequest {
+    image: String,  // base64 encoded image
+    #[serde(default = "default_threshold")]
+    threshold: u8,
+    #[serde(default = "default_min_area")]
+    min_area: usize,
+    #[serde(default = "default_max_area_ratio")]
+    max_area_ratio: f32,
+}
+
+fn default_threshold() -> u8 {
+    200
+}
+
+fn default_min_area() -> usize {
+    200  // Much smaller for blueprint detection
+}
+
+fn default_max_area_ratio() -> f32 {
+    0.3
+}
+
+/// Detect rooms using connected components on the image
+async fn detect_rooms_connected_components_handler(
+    Json(request): Json<ImageDetectRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received original connected components detection request");
+
+    // Decode base64 image
+    let engine = base64::engine::general_purpose::STANDARD;
+    let img_bytes = engine
+        .decode(&request.image)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_BASE64".to_string(),
+                    message: format!("Failed to decode base64 image: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Image decoded, size: {} bytes", img_bytes.len());
+
+    // Load image
+    let img = image::load_from_memory(&img_bytes)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_IMAGE".to_string(),
+                    message: format!("Failed to load image: {}", e),
+                }),
+            )
+        })?
+        .to_luma8();
+
+    info!("Image loaded: {}x{}", img.width(), img.height());
+
+    // Detect rooms using original connected components
+    let rooms = connected_components::detect_rooms_connected_components(
+        &img,
+        request.threshold,
+        request.min_area,
+        request.max_area_ratio,
+    );
+
+    info!("Detected {} rooms using original connected components", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
+}
+
+async fn detect_rooms_connected_components_enhanced_handler(
+    Json(request): Json<ImageDetectRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received enhanced connected components detection request");
+
+    // Decode base64 image
+    let engine = base64::engine::general_purpose::STANDARD;
+    let img_bytes = engine
+        .decode(&request.image)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_BASE64".to_string(),
+                    message: format!("Failed to decode base64 image: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Image decoded, size: {} bytes", img_bytes.len());
+
+    // Load image
+    let img = image::load_from_memory(&img_bytes)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_IMAGE".to_string(),
+                    message: format!("Failed to load image: {}", e),
+                }),
+            )
+        })?
+        .to_luma8();
+
+    info!("Image loaded: {}x{}", img.width(), img.height());
+
+    let start_time = Instant::now();
+
+    // Enhanced flood fill with morphological operations
+    let binary = connected_components::threshold_image_enhanced(&img, request.threshold);
+    let components = connected_components::find_connected_components_enhanced(&binary, request.min_area, request.max_area_ratio);
+    
+    let mut rooms = Vec::new();
+    let mut room_id = 0;
+    for (area, bbox) in components.iter() {
+        let (min_x, min_y, max_x, max_y) = *bbox;
+
+        // Create bounding box in normalized coordinates (0-1000 scale for compatibility)
+        let norm_x = (min_x as f64 / img.width() as f64) * 1000.0;
+        let norm_y = (min_y as f64 / img.height() as f64) * 1000.0;
+        let norm_max_x = (max_x as f64 / img.width() as f64) * 1000.0;
+        let norm_max_y = (max_y as f64 / img.height() as f64) * 1000.0;
+
+        let bounding_box = [norm_x, norm_y, norm_max_x, norm_max_y];
+
+        // Create corner points for the room polygon
+        let points = vec![
+            crate::Point { x: norm_x, y: norm_y },
+            crate::Point { x: norm_max_x, y: norm_y },
+            crate::Point { x: norm_max_x, y: norm_max_y },
+            crate::Point { x: norm_x, y: norm_max_y },
+        ];
+
+        rooms.push(Room {
+            id: room_id,
+            bounding_box,
+            area: *area as f64,
+            name_hint: connected_components::generate_room_name(*area as f64),
+            points,
+        });
+
+        room_id += 1;
+    }
+    
+    let execution_time = start_time.elapsed().as_millis() as u64;
+    info!("Detected {} rooms using enhanced connected components in {}ms", rooms.len(), execution_time);
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
+}
+
+async fn detect_python_cc_handler(
+    Json(request): Json<ImageDetectRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received Python CC detection request");
+
+    // Create JSON input for Python script
+    let input_json = serde_json::json!({
+        "image": request.image
+    });
+
+    // Call Python script via subprocess
+    let python_path = ".venv/bin/python";
+    let script_path = "room_detection_image_api.py";
+
+    let mut child = Command::new(python_path)
+        .arg(script_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "PYTHON_EXEC_ERROR".to_string(),
+                    message: format!("Failed to spawn Python process: {}", e),
+                }),
+            )
+        })?;
+
+    // Write JSON to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input_json.to_string().as_bytes())
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "PYTHON_STDIN_ERROR".to_string(),
+                        message: format!("Failed to write to Python stdin: {}", e),
+                    }),
+                )
+            })?;
+    }
+
+    // Wait for Python script to complete
+    let output = child.wait_with_output().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "PYTHON_WAIT_ERROR".to_string(),
+                message: format!("Failed to wait for Python process: {}", e),
+            }),
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "PYTHON_SCRIPT_ERROR".to_string(),
+                message: format!("Python script failed: {}", stderr),
+            }),
+        ));
+    }
+
+    // Parse Python output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let python_response: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "PYTHON_PARSE_ERROR".to_string(),
+                message: format!("Failed to parse Python output: {}", e),
+            }),
+        )
+    })?;
+
+    // Extract rooms from Python response
+    let rooms: Vec<Room> = serde_json::from_value(python_response["rooms"].clone()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "PYTHON_ROOMS_ERROR".to_string(),
+                message: format!("Failed to extract rooms from Python response: {}", e),
+            }),
+        )
+    })?;
+
+    info!("Detected {} rooms using Python CC", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
+}
+
+
+
+/// Detect rooms using graph-based detection on rasterized image
+async fn detect_rooms_graph_image_handler(
+    Json(request): Json<ImageDetectRequest>,
+) -> Result<Json<DetectRoomsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Received graph-image detection request");
+
+    // Decode base64 image
+    let engine = base64::engine::general_purpose::STANDARD;
+    let img_bytes = engine
+        .decode(&request.image)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "INVALID_BASE64".to_string(),
+                    message: format!("Failed to decode base64 image: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Image decoded, size: {} bytes", img_bytes.len());
+
+    // Use VTracer to extract lines from the image
+    let config = detector_orchestrator::DetectorConfig {
+        area_threshold: 100.0,
+        door_threshold: 50.0,
+        enable_vision: false,
+        enable_yolo: false,
+        strategy: detector_orchestrator::CombinationStrategy::VTracerOnly,
+        confidence_threshold: 0.75,
+        vision_model: "gpt-4o-mini".to_string(),
+    };
+
+    let orchestrator = detector_orchestrator::DetectorOrchestrator::new(config);
+
+    let empty_lines: Vec<Line> = Vec::new();
+    let result = orchestrator
+        .detect_rooms(&empty_lines, Some(&img_bytes), None)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "DETECTION_FAILED".to_string(),
+                    message: format!("Graph detection failed: {}", e),
+                }),
+            )
+        })?;
+
+    let rooms: Vec<Room> = result
+        .rooms
+        .iter()
+        .map(|r| r.room.clone())
+        .collect();
+
+    info!("Detected {} rooms using graph-image detection", rooms.len());
+
+    Ok(Json(DetectRoomsResponse {
+        total_rooms: rooms.len(),
+        rooms,
+    }))
+}
+
 /// Create the Axum app with all routes and middleware
 /// This is exposed for integration testing
 pub fn create_app() -> Router {
     // Configure CORS from environment or use localhost for development
     let allowed_origins = std::env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080,http://127.0.0.1:8080,http://localhost:8081,http://127.0.0.1:8081,http://localhost:8082,http://127.0.0.1:8082,http://localhost:9090,http://127.0.0.1:9090".to_string());
 
     let origins: Vec<_> = allowed_origins
         .split(',')
@@ -831,6 +1247,11 @@ pub fn create_app() -> Router {
         .route("/detect/simple", post(detect_rooms_simple_handler))
         .route("/detect/enhanced", post(enhanced_detect_handler))
         .route("/detect/svg", post(svg_detect_handler))
+        .route("/detect/connected-components", post(detect_rooms_connected_components_handler))
+        .route("/detect/rust-floodfill", post(detect_rust_floodfill_handler))
+        .route("/detect/vector-graph", post(detect_vector_graph_handler))
+        .route("/detect/graph-image", post(detect_rooms_graph_image_handler))
+        .route("/detect/python-cc", post(detect_python_cc_handler))
         .route("/upload-image", post(upload_image_handler))
         .route("/vectorize-blueprint", post(vectorize_blueprint_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images

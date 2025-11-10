@@ -150,41 +150,39 @@ pub fn to_data_url(&self) -> String {
     format!("data:image/png;base64,{}", self.base64_data)
 }
 
-/// Preprocess image for VTracer: grayscale + edge detection + thresholding
+/// Preprocess image for VTracer: create high-contrast binary image
+/// VTracer needs strong contrast to detect lines
 pub fn preprocess_for_vtracer(&self) -> anyhow::Result<Vec<u8>> {
     use std::io::Cursor;
-    
-    // Load the normalized image from base64
-    let img_bytes = base64::decode(&self.base64_data)?;
+
+    // Decode the normalized image
+    let img_bytes = STANDARD.decode(&self.base64_data)?;
     let img = image::load_from_memory(&img_bytes)
-        .context("Failed to load preprocessed image")?
+        .context("Failed to load normalized image")?
         .to_luma8();
-    
-    // Step 1: Apply Gaussian blur to reduce noise
-    let blurred = image::imageops::blur(&img, 1.0);
-    
-    // Step 2: Simple Sobel edge detection
-    let edges = self.sobel_edge_detect(&blurred);
-    
-    // Step 3: Threshold to create binary image
-    let threshold = 50u8; // Adjustable threshold
-    let binary = self.threshold_image(&edges, threshold);
-    
-    // Step 4: Convert back to RGBA for consistency with normalized format
-    let mut rgba = ImageBuffer::new(NORMALIZED_SIZE, NORMALIZED_SIZE);
-    for (x, y, pixel) in rgba.enumerate_pixels_mut() {
-        if x < binary.width() && y < binary.height() {
-            let gray_val = binary.get_pixel(x, y)[0];
-            *pixel = Rgba([gray_val, gray_val, gray_val, 255]);
-        } else {
-            *pixel = Rgba([255, 255, 255, 255]); // White background
-        }
+
+    // Simple threshold to create binary image
+    // VTracer needs BLACK lines on WHITE background
+    let threshold = 200u8;  // Adjust based on your blueprint images
+    let binary = self.threshold_image(&img, threshold);
+
+    // Convert to RGB (VTracer Color mode expects RGB)
+    let (width, height) = binary.dimensions();
+    let mut rgb_img = ImageBuffer::from_pixel(width, height, Rgba([255u8, 255u8, 255u8, 255u8]));
+
+    for (x, y, pixel) in binary.enumerate_pixels() {
+        let val = pixel[0];
+        rgb_img.put_pixel(x, y, Rgba([val, val, val, 255u8]));
     }
-    
+
     // Encode as PNG
-    let mut buffer = Vec::new();
-    DynamicImage::ImageRgba8(rgba).write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png)?;
-    Ok(buffer)
+    let mut png_bytes = Vec::new();
+    DynamicImage::ImageRgba8(rgb_img).write_to(
+        &mut Cursor::new(&mut png_bytes),
+        ImageFormat::Png,
+    )?;
+
+    Ok(png_bytes)
 }
 
 fn sobel_edge_detect(&self, img: &GrayImage) -> GrayImage {
@@ -211,16 +209,19 @@ fn sobel_edge_detect(&self, img: &GrayImage) -> GrayImage {
 fn threshold_image(&self, img: &GrayImage, threshold: u8) -> GrayImage {
     let (width, height) = img.dimensions();
     let mut binary = GrayImage::new(width, height);
-    
+
     for (x, y, pixel) in binary.enumerate_pixels_mut() {
-        let val = if img.get_pixel(x, y)[0] > threshold {
-            255u8
+        // VTracer expects BLACK lines on WHITE background
+        // Pixels darker than threshold become BLACK (lines)
+        // Pixels lighter than threshold become WHITE (background)
+        let val = if img.get_pixel(x, y)[0] < threshold {
+            0u8  // Dark pixel -> BLACK line
         } else {
-            0u8
+            255u8  // Light pixel -> WHITE background
         };
         *pixel = Luma([val]);
     }
-    
+
     binary
 }
 }
