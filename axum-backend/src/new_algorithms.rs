@@ -157,12 +157,30 @@ fn find_connected_components_floodfill(img: &GrayImage) -> Vec<(usize, (u32, u32
     let mut visited = vec![false; width as usize * height as usize];
     let mut components = Vec::new();
 
+    // Early filters (same as Algorithm 2)
+    let min_area = 500;
+    let max_area = (width as usize * height as usize) * 3 / 10; // 30% of image
+
     for y in 0..height {
         for x in 0..width {
             let idx = (y as usize * width as usize) + x as usize;
             if img.get_pixel(x, y)[0] == 255 && !visited[idx] {
                 let (area, bbox) = flood_fill_internal(img, x, y, &mut visited, width, height);
-                if area > 200 {
+                let (min_x, min_y, max_x, max_y) = bbox;
+
+                // Calculate dimensions
+                let w = max_x - min_x;
+                let h = max_y - min_y;
+
+                // Calculate aspect ratio
+                let aspect_ratio = if w > h {
+                    w as f64 / h.max(1) as f64
+                } else {
+                    h as f64 / w.max(1) as f64
+                };
+
+                // Early filter by area and aspect ratio (same as Algorithm 2)
+                if area >= min_area && area <= max_area && aspect_ratio < 15.0 {
                     components.push((area, bbox));
                 }
             }
