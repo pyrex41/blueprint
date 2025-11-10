@@ -1,2 +1,68 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+**/target/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+*.py
+
+# Documentation and tests
+docs/
+*.md
+test-data/
+log_docs/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/
+.cursor/
+.zed/
+.taskmaster/
+
+# Frontend build artifacts (will be rebuilt in Docker)
+leptos-frontend/dist/
+leptos-frontend/target/
+leptos-frontend/pkg/
+
+# Test and development files
+*.test
+*.spec
+test_*
+PIPELINE_TEST_RESULTS.md
+VISION_MODELS.md
+VTRACER_CONFIG_TEST_RESULTS.md
+WORK_SUMMARY_*.md
+
+
+# SVG and image test files
+*.svg
+test-floorplan.json
+detected_rooms.json
+export.svg
+requirements.txt
+
+# Scripts
+*.sh
+justfile
+
+# MCP config
+.mcp.json
+
+# Fly.io
 fly.toml
-.venv

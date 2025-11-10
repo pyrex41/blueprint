@@ -1,8 +1,3 @@
-[[hooks]]
-stage = "build"
-command = "cargo"
-command_arguments = ["build", "--release", "--target", "wasm32-unknown-unknown"]
-
 [build]
 target = "index.html"
 dist = "dist"

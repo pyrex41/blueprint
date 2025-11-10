@@ -1267,6 +1267,9 @@ async fn gpt4o_validation_handler(
     }
 }
 
+use tower_http::{services::ServeDir, trace::TraceLayer};
+use std::net::SocketAddr;
+
 pub fn create_app() -> Router {
     // Configure CORS from environment or use localhost for development
     let allowed_origins = std::env::var("ALLOWED_ORIGINS")
@@ -1290,7 +1293,7 @@ pub fn create_app() -> Router {
             .allow_headers([header::CONTENT_TYPE])
     };
 
-    Router::new()
+    let api_router = Router::new()
         .route("/health", get(health_check))
         .route("/detect", post(detect_rooms_handler))
         .route("/detect/simple", post(detect_rooms_simple_handler))
@@ -1305,8 +1308,16 @@ pub fn create_app() -> Router {
         .route("/vectorize-blueprint", post(vectorize_blueprint_handler))
         .route("/validate/gpt4o", post(gpt4o_validation_handler))
         .route("/test", get(test_handler))
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
-        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)); // 10MB max for images
+
+    // Create main router with API routes
+    let app = Router::new()
+        .nest("/api", api_router)
+        .layer(cors);
+
+    // Serve static frontend files as fallback
+    app.fallback_service(ServeDir::new(".").append_index_html_on_directories(true))
 }
 
 #[tokio::main]
@@ -1323,9 +1334,11 @@ async fn main() {
 
     let app = create_app();
 
-    let addr = "0.0.0.0:3000";
+    // Use PORT env var if set (for Fly.io), otherwise default to 3000
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let addr = format!("0.0.0.0:{}", port);
     info!("Server listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

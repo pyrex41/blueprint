@@ -895,7 +895,7 @@ async fn vectorize_blueprint<T: Serialize>(request: T) -> Result<serde_json::Val
     let client = reqwest::Client::new();
 
     let response = client
-        .post("http://localhost:3000/vectorize-blueprint")
+        .post("/api/vectorize-blueprint")
         .json(&request)
         .send()
         .await
@@ -918,9 +918,9 @@ async fn detect_rooms(request: DetectRequest, strategy: DetectionStrategy) -> Re
 
     // Use different endpoint based on strategy
     let endpoint = match strategy {
-        DetectionStrategy::Simple => "http://localhost:3000/detect",
-        DetectionStrategy::GraphOnly => "http://localhost:3000/detect",
-        _ => "http://localhost:3000/detect", // All strategies use unified endpoint
+        DetectionStrategy::Simple => "/api/detect",
+        DetectionStrategy::GraphOnly => "/api/detect",
+        _ => "/api/detect", // All strategies use unified endpoint
     };
 
     let response = client
@@ -963,7 +963,7 @@ async fn detect_svg_rooms(svg_content: String, area_threshold: f64, door_thresho
     };
 
     let response = client
-        .post("http://localhost:3000/detect/svg")
+        .post("/api/detect/svg")
         .json(&request)
         .send()
         .await
@@ -1281,7 +1281,7 @@ async fn run_dual_detection(
 
     // Algorithm 1: Flood Fill
     let start1 = Date::now();
-    match Request::post("http://localhost:3000/detect/rust-floodfill")
+    match Request::post("/api/detect/rust-floodfill")
         .header("Content-Type", "application/json")
         .body(payload.to_string())?
         .send()
@@ -1315,7 +1315,7 @@ async fn run_dual_detection(
 
     // Algorithm 2: Connected Components
     let start2 = Date::now();
-    match Request::post("http://localhost:3000/detect/connected-components")
+    match Request::post("/api/detect/connected-components")
         .header("Content-Type", "application/json")
         .body(payload.to_string())?
         .send()
@@ -1432,7 +1432,7 @@ async fn run_gpt4o_validation(
     web_sys::console::log_1(&"Sending request to backend...".into());
 
     // Call backend endpoint for GPT-4o
-    match Request::post("http://localhost:3000/validate/gpt4o")
+    match Request::post("/api/validate/gpt4o")
         .header("Content-Type", "application/json")
         .body(request_body.to_string())?
         .send()
@@ -2009,7 +2009,7 @@ async fn detect_original_cc(image: String) -> Result<DetectResponse, String> {
     };
 
     let response = client
-        .post("http://localhost:3000/detect/connected-components")
+        .post("/api/detect/connected-components")
         .json(&request)
         .send()
         .await
@@ -2066,7 +2066,7 @@ async fn detect_rust_floodfill(
     };
 
     let response = client
-        .post("http://localhost:3000/detect/rust-floodfill")
+        .post("/api/detect/rust-floodfill")
         .json(&request)
         .send()
         .await

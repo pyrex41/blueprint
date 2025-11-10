@@ -27,7 +27,7 @@ async fn detect_rust_floodfill(image: String, threshold: u8, min_area: usize, ma
     };
 
     let response = client
-        .post("http://localhost:3000/detect/rust-floodfill")
+        .post("/api/detect/rust-floodfill")
         .json(&request)
         .send()
         .await
@@ -51,7 +51,7 @@ async fn detect_vector_graph(image: String) -> Result<DetectResponse, String> {
     let request = VectorGraphRequest { image };
 
     let response = client
-        .post("http://localhost:3000/detect/vector-graph")
+        .post("/api/detect/vector-graph")
         .json(&request)
         .send()
         .await
