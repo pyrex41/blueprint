@@ -8,6 +8,7 @@ rust-version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+gloo-net = "0.6"
 leptos.workspace = true
 leptos_meta.workspace = true
 leptos_router.workspace = true
@@ -18,3 +19,4 @@ console_error_panic_hook.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+js-sys = "0.3"

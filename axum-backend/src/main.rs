@@ -1218,6 +1218,55 @@ async fn detect_rooms_graph_image_handler(
 
 /// Create the Axum app with all routes and middleware
 /// This is exposed for integration testing
+async fn test_handler() -> Json<Vec<serde_json::Value>> {
+    Json(vec![
+        serde_json::json!({
+            "id": "room_001",
+            "bounding_box": [50.0, 50.0, 200.0, 300.0],
+            "name_hint": "Entry Hall"
+        }),
+        serde_json::json!({
+            "id": "room_002",
+            "bounding_box": [250.0, 50.0, 700.0, 500.0],
+            "name_hint": "Main Office"
+        }),
+    ])
+}
+
+/// GPT-4o validation handler - proxies request to OpenAI API
+async fn gpt4o_validation_handler(
+    Json(payload): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    info!("GPT-4o validation request received");
+
+    // Get OpenAI API key from environment
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "OPENAI_API_KEY not configured".to_string()))?;
+
+    // Forward request to OpenAI API
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("OpenAI API request failed: {}", e)))?;
+
+    let status = response.status();
+    let body = response.text().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read response: {}", e)))?;
+
+    if status.is_success() {
+        info!("GPT-4o validation completed successfully");
+        Ok((StatusCode::OK, body))
+    } else {
+        warn!("GPT-4o validation failed with status: {}", status);
+        Err((StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), body))
+    }
+}
+
 pub fn create_app() -> Router {
     // Configure CORS from environment or use localhost for development
     let allowed_origins = std::env::var("ALLOWED_ORIGINS")
@@ -1254,6 +1303,8 @@ pub fn create_app() -> Router {
         .route("/detect/python-cc", post(detect_python_cc_handler))
         .route("/upload-image", post(upload_image_handler))
         .route("/vectorize-blueprint", post(vectorize_blueprint_handler))
+        .route("/validate/gpt4o", post(gpt4o_validation_handler))
+        .route("/test", get(test_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB max for images
         .layer(cors)
 }

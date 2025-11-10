@@ -1,0 +1,9 @@
+[package]
+name = "vtracer-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vtracer = "0.6.5"
+visioncortex = "0.8.8"
+image = "0.25"

@@ -182,7 +182,7 @@ fn transform_point(
     point: &Point,
     bounds: &Bounds,
     scale: f64,
-    width: f64,
+    _width: f64,
     height: f64,
     padding: f64,
 ) -> (f64, f64) {

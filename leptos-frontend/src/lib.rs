@@ -6,6 +6,7 @@ use leptos_router::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use js_sys::Date;
 
 mod canvas;
 use canvas::*;
@@ -169,7 +170,8 @@ pub fn App() -> impl IntoView {
         <Title text="AI Floorplan Room Detector"/>
         <Router>
             <Routes fallback=|| "Not found">
-                <Route path=path!("") view=FloorplanDetector/>
+                <Route path=path!("") view=DualAlgorithmDetector/>
+                <Route path=path!("/old") view=FloorplanDetector/>
                 <Route path=path!("/test") view=AlgorithmTest/>
             </Routes>
         </Router>
@@ -977,6 +979,533 @@ async fn detect_svg_rooms(svg_content: String, area_threshold: f64, door_thresho
         .json::<DetectResponse>()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+// ============================================================================
+// DUAL ALGORITHM DETECTOR - Simplified UI for comparing both CC algorithms
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct AlgoResult {
+    rooms: Vec<Room>,
+    execution_time_ms: u64,
+    room_count: usize,
+}
+
+#[component]
+fn DualAlgorithmDetector() -> impl IntoView {
+    // State
+    let algo1_result = RwSignal::new(Option::<AlgoResult>::None);
+    let algo2_result = RwSignal::new(Option::<AlgoResult>::None);
+    let loading = RwSignal::new(false);
+    let error = RwSignal::new(Option::<String>::None);
+    let uploaded_filename = RwSignal::new(Option::<String>::None);
+    let use_gpt4o = RwSignal::new(false);
+    let gpt4o_result = RwSignal::new(Option::<String>::None);
+    let base64_image = RwSignal::new(Option::<String>::None);
+
+    let file_input_ref = NodeRef::<leptos::html::Input>::new();
+    let canvas1_ref = NodeRef::<leptos::html::Canvas>::new();
+    let canvas2_ref = NodeRef::<leptos::html::Canvas>::new();
+
+    // Re-render canvases when results change
+    create_effect(move |_| {
+        if let Some(result) = algo1_result.get() {
+            if let Some(canvas) = canvas1_ref.get() {
+                render_rooms(&canvas, &result.rooms);
+            }
+        }
+    });
+
+    create_effect(move |_| {
+        if let Some(result) = algo2_result.get() {
+            if let Some(canvas) = canvas2_ref.get() {
+                render_rooms(&canvas, &result.rooms);
+            }
+        }
+    });
+
+    // File upload handler
+    let on_file_change = move |_| {
+        if let Some(input) = file_input_ref.get() {
+            if let Some(files) = input.files() {
+                if let Some(file) = files.get(0) {
+                    let file_name = file.name();
+                    let file_type = file.type_();
+
+                    // Only accept PNG/JPG
+                    if !file_type.starts_with("image/") ||
+                       (!file_name.ends_with(".png") && !file_name.ends_with(".jpg") && !file_name.ends_with(".jpeg")) {
+                        error.set(Some("Only PNG and JPG images are supported.".to_string()));
+                        return;
+                    }
+
+                    uploaded_filename.set(Some(file_name.clone()));
+                    error.set(None);
+                    loading.set(true);
+                    algo1_result.set(None);
+                    algo2_result.set(None);
+                    gpt4o_result.set(None);
+
+                    // Read as base64
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let reader_clone = reader.clone();
+
+                    let onload = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                        if let Ok(result) = reader_clone.result() {
+                            if let Some(data_url) = result.as_string() {
+                                let parts: Vec<&str> = data_url.split(",").collect();
+                                if parts.len() > 1 {
+                                    let b64 = parts[1].to_string();
+                                    base64_image.set(Some(b64.clone()));
+
+                                    // Run both algorithms
+                                    spawn_local(async move {
+                                        let _ = run_dual_detection(
+                                            b64,
+                                            algo1_result,
+                                            algo2_result,
+                                            loading,
+                                            error,
+                                            use_gpt4o,
+                                            gpt4o_result,
+                                            canvas1_ref,
+                                            canvas2_ref,
+                                        ).await;
+                                    });
+                                }
+                            }
+                        }
+                    }) as Box<dyn FnMut(_)>);
+
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    let _ = reader.read_as_data_url(&file);
+                }
+            }
+        }
+    };
+
+    view! {
+        <div class="container" style="max-width: 1600px; margin: 0 auto; padding: 20px;">
+            <h1>"Connected Components Room Detector"</h1>
+            <p style="color: #666; margin-bottom: 30px;">
+                "Dual Algorithm Comparison: Flood Fill vs Connected Components"
+            </p>
+
+            <div style="margin-bottom: 20px;">
+                <input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    node_ref=file_input_ref
+                    on:change=on_file_change
+                    style="padding: 10px;"
+                />
+                {move || uploaded_filename.get().map(|name| view! {
+                    <p style="margin-top: 10px; color: #28a745;">"✓ Uploaded: " {name}</p>
+                })}
+            </div>
+
+            <div style="margin-bottom: 20px;">
+                <label style="cursor: pointer;">
+                    <input
+                        type="checkbox"
+                        prop:checked=move || use_gpt4o.get()
+                        on:change=move |ev| use_gpt4o.set(event_target_checked(&ev))
+                    />
+                    " Enable GPT-4o Validation (experimental)"
+                </label>
+            </div>
+
+            {move || error.get().map(|err| view! {
+                <div style="background: #f8d7da; color: #721c24; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
+                    {err}
+                </div>
+            })}
+
+            {move || if loading.get() {
+                view! {
+                    <div style="background: #d1ecf1; color: #0c5460; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
+                        "⏳ Running both algorithms in parallel..."
+                    </div>
+                }.into_any()
+            } else {
+                view! { <div></div> }.into_any()
+            }}
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 30px;">
+                // Algorithm 1
+                <div style="border: 2px solid #ddd; border-radius: 8px; padding: 20px;">
+                    <h2 style="color: #0056b3;">"Algorithm 1: Flood Fill"</h2>
+                    {move || if let Some(result) = algo1_result.get() {
+                        view! {
+                            <div>
+                                <div style="display: flex; gap: 20px; margin: 15px 0;">
+                                    <div>
+                                        <strong>"Rooms: "</strong>
+                                        <span style="font-size: 24px; color: #28a745;">{result.room_count}</span>
+                                    </div>
+                                    <div>
+                                        <strong>"Time: "</strong>
+                                        <span style="font-size: 24px; color: #007bff;">{result.execution_time_ms}"ms"</span>
+                                    </div>
+                                </div>
+                                <button
+                                    style="margin: 10px 0; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                                    on:click=move |_| {
+                                        if let Some(res) = algo1_result.get() {
+                                            download_json(&res.rooms, "algorithm1_flood_fill.json");
+                                        }
+                                    }
+                                >
+                                    "Download JSON"
+                                </button>
+                                <canvas
+                                    node_ref=canvas1_ref
+                                    width="700"
+                                    height="500"
+                                    style="border: 1px solid #ccc; width: 100%; max-width: 700px;"
+                                />
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <div style="padding: 40px; text-align: center; color: #999;">
+                                "Upload an image to see results"
+                            </div>
+                        }.into_any()
+                    }}
+                </div>
+
+                // Algorithm 2
+                <div style="border: 2px solid #ddd; border-radius: 8px; padding: 20px;">
+                    <h2 style="color: #0056b3;">"Algorithm 2: Connected Components"</h2>
+                    {move || if let Some(result) = algo2_result.get() {
+                        view! {
+                            <div>
+                                <div style="display: flex; gap: 20px; margin: 15px 0;">
+                                    <div>
+                                        <strong>"Rooms: "</strong>
+                                        <span style="font-size: 24px; color: #28a745;">{result.room_count}</span>
+                                    </div>
+                                    <div>
+                                        <strong>"Time: "</strong>
+                                        <span style="font-size: 24px; color: #007bff;">{result.execution_time_ms}"ms"</span>
+                                    </div>
+                                </div>
+                                <button
+                                    style="margin: 10px 0; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;"
+                                    on:click=move |_| {
+                                        if let Some(res) = algo2_result.get() {
+                                            download_json(&res.rooms, "algorithm2_connected_components.json");
+                                        }
+                                    }
+                                >
+                                    "Download JSON"
+                                </button>
+                                <canvas
+                                    node_ref=canvas2_ref
+                                    width="700"
+                                    height="500"
+                                    style="border: 1px solid #ccc; width: 100%; max-width: 700px;"
+                                />
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <div style="padding: 40px; text-align: center; color: #999;">
+                                "Upload an image to see results"
+                            </div>
+                        }.into_any()
+                    }}
+                </div>
+            </div>
+
+            {move || if use_gpt4o.get() {
+                view! {
+                    <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                        <h2>"GPT-4o Validation"</h2>
+                        {move || if let Some(validation) = gpt4o_result.get() {
+                            view! {
+                                <p>{validation}</p>
+                            }.into_any()
+                        } else if loading.get() {
+                            view! {
+                                <p style="color: #666;">"Waiting for validation..."</p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <p style="color: #999;">"Upload an image to see validation"</p>
+                            }.into_any()
+                        }}
+                    </div>
+                }.into_any()
+            } else {
+                view! { <div></div> }.into_any()
+            }}
+        </div>
+    }
+}
+
+async fn run_dual_detection(
+    base64_img: String,
+    algo1: RwSignal<Option<AlgoResult>>,
+    algo2: RwSignal<Option<AlgoResult>>,
+    loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    use_gpt4o: RwSignal<bool>,
+    gpt4o_result: RwSignal<Option<String>>,
+    canvas1: NodeRef<leptos::html::Canvas>,
+    canvas2: NodeRef<leptos::html::Canvas>,
+) -> Result<(), gloo_net::Error> {
+    use gloo_net::http::Request;
+    use serde_json::json;
+
+    let payload = json!({
+        "image": base64_img,
+        "threshold": 127,
+        "min_area": 500,
+        "max_area_ratio": 0.3
+    });
+
+    // Algorithm 1: Flood Fill
+    let start1 = Date::now();
+    match Request::post("http://localhost:3000/detect/rust-floodfill")
+        .header("Content-Type", "application/json")
+        .body(payload.to_string())?
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let time1 = (Date::now() - start1) as u64;
+            match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(rooms_arr) = data.get("rooms").and_then(|v| v.as_array()) {
+                        let rooms: Vec<Room> = serde_json::from_value(serde_json::Value::Array(rooms_arr.clone())).unwrap_or_default();
+                        let count = data.get("total_rooms").and_then(|v| v.as_u64()).unwrap_or(rooms.len() as u64) as usize;
+
+                        algo1.set(Some(AlgoResult {
+                            rooms: rooms.clone(),
+                            execution_time_ms: time1,
+                            room_count: count,
+                        }));
+
+                        // Render
+                        if let Some(canvas) = canvas1.get() {
+                            render_rooms(&canvas, &rooms);
+                        }
+                    }
+                }
+                Err(e) => error.set(Some(format!("Algo 1 parse error: {}", e))),
+            }
+        }
+        Err(e) => error.set(Some(format!("Algo 1 request failed: {}", e))),
+    }
+
+    // Algorithm 2: Connected Components
+    let start2 = Date::now();
+    match Request::post("http://localhost:3000/detect/connected-components")
+        .header("Content-Type", "application/json")
+        .body(payload.to_string())?
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let time2 = (Date::now() - start2) as u64;
+            match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(rooms_arr) = data.get("rooms").and_then(|v| v.as_array()) {
+                        let rooms: Vec<Room> = serde_json::from_value(serde_json::Value::Array(rooms_arr.clone())).unwrap_or_default();
+                        let count = data.get("total_rooms").and_then(|v| v.as_u64()).unwrap_or(rooms.len() as u64) as usize;
+
+                        algo2.set(Some(AlgoResult {
+                            rooms: rooms.clone(),
+                            execution_time_ms: time2,
+                            room_count: count,
+                        }));
+
+                        // Render
+                        if let Some(canvas) = canvas2.get() {
+                            render_rooms(&canvas, &rooms);
+                        }
+                    }
+                }
+                Err(e) => error.set(Some(format!("Algo 2 parse error: {}", e))),
+            }
+        }
+        Err(e) => error.set(Some(format!("Algo 2 request failed: {}", e))),
+    }
+
+    // GPT-4o validation
+    if use_gpt4o.get() {
+        gpt4o_result.set(Some("🔄 Running GPT-4o validation...".to_string()));
+
+        match run_gpt4o_validation(
+            &base64_img,
+            algo1.get().as_ref(),
+            algo2.get().as_ref(),
+        ).await {
+            Ok(validation_text) => {
+                gpt4o_result.set(Some(validation_text));
+            }
+            Err(e) => {
+                gpt4o_result.set(Some(format!("❌ GPT-4o validation failed: {:?}", e)));
+            }
+        }
+    }
+
+    loading.set(false);
+    Ok(())
+}
+
+async fn run_gpt4o_validation(
+    base64_image: &str,
+    algo1_result: Option<&AlgoResult>,
+    algo2_result: Option<&AlgoResult>,
+) -> Result<String, gloo_net::Error> {
+    use gloo_net::http::Request;
+    use serde_json::json;
+
+    // Prepare the validation prompt
+    let algo1_count = algo1_result.map(|r| r.room_count).unwrap_or(0);
+    let algo2_count = algo2_result.map(|r| r.room_count).unwrap_or(0);
+
+    let prompt = format!(
+        "You are analyzing a blueprint/floorplan image. Two different room detection algorithms have been run:\n\n\
+        - Algorithm 1 (Flood Fill): Detected {} rooms\n\
+        - Algorithm 2 (Connected Components): Detected {} rooms\n\n\
+        Please analyze this blueprint image and:\n\
+        1. Count the actual number of rooms visible in the image\n\
+        2. Evaluate whether the algorithm results are accurate\n\
+        3. Identify any rooms that might have been missed or incorrectly detected\n\
+        4. Provide a confidence score (0-100%) for each algorithm\n\
+        5. Give your final recommendation on which algorithm performed better\n\n\
+        Be specific and reference visual elements from the image in your analysis.",
+        algo1_count, algo2_count
+    );
+
+    let request_body = json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{}", base64_image)
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 1000
+    });
+
+    // Call backend endpoint for GPT-4o
+    match Request::post("http://localhost:3000/validate/gpt4o")
+        .header("Content-Type", "application/json")
+        .body(request_body.to_string())?
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.ok() {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        if let Some(content) = data
+                            .get("choices")
+                            .and_then(|c| c.get(0))
+                            .and_then(|c| c.get("message"))
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                        {
+                            Ok(format!("✅ GPT-4o Analysis:\n\n{}", content))
+                        } else {
+                            Err(gloo_net::Error::GlooError("Invalid response format from GPT-4o".to_string()))
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                Err(gloo_net::Error::GlooError(format!("GPT-4o API returned status: {}", response.status())))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn download_json(rooms: &[Room], filename: &str) {
+    use wasm_bindgen::JsValue;
+
+    let json_str = serde_json::to_string_pretty(rooms).unwrap_or_else(|_| "{}".to_string());
+
+    // Create a blob
+    let array = js_sys::Array::new();
+    array.push(&JsValue::from_str(&json_str));
+
+    let blob = web_sys::Blob::new_with_str_sequence(&array).unwrap();
+    let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
+
+    // Create download link and trigger
+    let document = web_sys::window().unwrap().document().unwrap();
+    let a = document.create_element("a").unwrap();
+    let a = a.dyn_into::<web_sys::HtmlAnchorElement>().unwrap();
+
+    a.set_href(&url);
+    a.set_download(filename);
+    a.click();
+
+    // Cleanup
+    web_sys::Url::revoke_object_url(&url).unwrap();
+}
+
+fn render_rooms(canvas: &web_sys::HtmlCanvasElement, rooms: &[Room]) {
+    let ctx = canvas
+        .get_context("2d")
+        .unwrap()
+        .unwrap()
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .unwrap();
+
+    let w = canvas.width() as f64;
+    let h = canvas.height() as f64;
+
+    // Clear
+    ctx.clear_rect(0.0, 0.0, w, h);
+    ctx.set_fill_style(&"white".into());
+    ctx.fill_rect(0.0, 0.0, w, h);
+
+    // Draw rooms
+    let colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A", "#98D8C8", "#F7DC6F", "#BB8FCE", "#85C1E2", "#F8B88B", "#AAB7B8"];
+
+    for (i, room) in rooms.iter().enumerate() {
+        if room.bounding_box.len() >= 4 {
+            let color = colors[i % colors.len()];
+            ctx.set_fill_style(&color.into());
+            ctx.set_stroke_style(&"#333".into());
+            ctx.set_line_width(2.0);
+
+            let x1 = (room.bounding_box[0] / 1000.0) * w;
+            let y1 = (room.bounding_box[1] / 1000.0) * h;
+            let x2 = (room.bounding_box[2] / 1000.0) * w;
+            let y2 = (room.bounding_box[3] / 1000.0) * h;
+
+            let rw = x2 - x1;
+            let rh = y2 - y1;
+
+            ctx.fill_rect(x1, y1, rw, rh);
+            ctx.stroke_rect(x1, y1, rw, rh);
+
+            ctx.set_fill_style(&"#000".into());
+            ctx.set_font("14px Arial");
+            let _ = ctx.fill_text(&format!("Room {}", room.id), x1 + 10.0, y1 + 25.0);
+        }
+    }
 }
 
 #[component]
