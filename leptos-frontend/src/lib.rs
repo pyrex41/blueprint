@@ -1243,6 +1243,17 @@ fn DualAlgorithmDetector() -> impl IntoView {
             } else {
                 view! { <div></div> }.into_any()
             }}
+
+            {move || base64_image.get().map(|b64| view! {
+                <div style="margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                    <h2>"Uploaded Image"</h2>
+                    <img
+                        src=format!("data:image/png;base64,{}", b64)
+                        style="max-width: 100%; max-height: 600px; border: 1px solid #ddd; border-radius: 4px; display: block; margin: 0 auto;"
+                        alt="Uploaded blueprint"
+                    />
+                </div>
+            })}
         </div>
     }
 }
