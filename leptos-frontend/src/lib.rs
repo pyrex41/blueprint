@@ -1337,7 +1337,11 @@ async fn run_dual_detection(
     }
 
     // GPT-4o validation
-    if use_gpt4o.get() {
+    let gpt4o_enabled = use_gpt4o.get();
+    web_sys::console::log_1(&format!("GPT-4o enabled: {}", gpt4o_enabled).into());
+
+    if gpt4o_enabled {
+        web_sys::console::log_1(&"Starting GPT-4o validation...".into());
         gpt4o_result.set(Some("🔄 Running GPT-4o validation...".to_string()));
 
         match run_gpt4o_validation(
@@ -1346,12 +1350,16 @@ async fn run_dual_detection(
             algo2.get().as_ref(),
         ).await {
             Ok(validation_text) => {
+                web_sys::console::log_1(&"GPT-4o validation successful".into());
                 gpt4o_result.set(Some(validation_text));
             }
             Err(e) => {
+                web_sys::console::log_1(&format!("GPT-4o validation error: {:?}", e).into());
                 gpt4o_result.set(Some(format!("❌ GPT-4o validation failed: {:?}", e)));
             }
         }
+    } else {
+        web_sys::console::log_1(&"GPT-4o validation skipped (not enabled)".into());
     }
 
     loading.set(false);
@@ -1366,9 +1374,13 @@ async fn run_gpt4o_validation(
     use gloo_net::http::Request;
     use serde_json::json;
 
+    web_sys::console::log_1(&"run_gpt4o_validation() called".into());
+
     // Prepare the validation prompt
     let algo1_count = algo1_result.map(|r| r.room_count).unwrap_or(0);
     let algo2_count = algo2_result.map(|r| r.room_count).unwrap_or(0);
+
+    web_sys::console::log_1(&format!("Algo1: {} rooms, Algo2: {} rooms", algo1_count, algo2_count).into());
 
     let prompt = format!(
         "You are analyzing a blueprint/floorplan image. Two different room detection algorithms have been run:\n\n\
@@ -1406,6 +1418,8 @@ async fn run_gpt4o_validation(
         "max_tokens": 1000
     });
 
+    web_sys::console::log_1(&"Sending request to backend...".into());
+
     // Call backend endpoint for GPT-4o
     match Request::post("http://localhost:3000/validate/gpt4o")
         .header("Content-Type", "application/json")
@@ -1414,9 +1428,11 @@ async fn run_gpt4o_validation(
         .await
     {
         Ok(response) => {
+            web_sys::console::log_1(&format!("Backend response status: {}", response.status()).into());
             if response.ok() {
                 match response.json::<serde_json::Value>().await {
                     Ok(data) => {
+                        web_sys::console::log_1(&"Successfully parsed JSON response".into());
                         if let Some(content) = data
                             .get("choices")
                             .and_then(|c| c.get(0))
@@ -1424,18 +1440,27 @@ async fn run_gpt4o_validation(
                             .and_then(|m| m.get("content"))
                             .and_then(|c| c.as_str())
                         {
+                            web_sys::console::log_1(&format!("Got content: {}", &content[..content.len().min(100)]).into());
                             Ok(format!("✅ GPT-4o Analysis:\n\n{}", content))
                         } else {
+                            web_sys::console::log_1(&"Invalid response format".into());
                             Err(gloo_net::Error::GlooError("Invalid response format from GPT-4o".to_string()))
                         }
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        web_sys::console::log_1(&format!("JSON parse error: {:?}", e).into());
+                        Err(e)
+                    }
                 }
             } else {
+                web_sys::console::log_1(&format!("Non-OK response: {}", response.status()).into());
                 Err(gloo_net::Error::GlooError(format!("GPT-4o API returned status: {}", response.status())))
             }
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            web_sys::console::log_1(&format!("Request error: {:?}", e).into());
+            Err(e)
+        }
     }
 }
 
